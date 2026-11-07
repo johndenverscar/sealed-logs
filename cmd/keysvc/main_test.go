@@ -76,6 +76,12 @@ func call(t *testing.T, ts *httptest.Server, method, path, tok string, body any)
 	return resp.StatusCode, out
 }
 
+// unsigned builds a JWT with "alg":"none" and no signature, the classic forgery.
+func unsigned(claims string) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(claims)) + "."
+}
+
 func today() string { return time.Now().UTC().Format(dayFmt) }
 
 // issue asks for today's public key as p_demo's producer and checks the signature.
@@ -125,7 +131,7 @@ func TestUnwrapPolicy(t *testing.T) {
 		{"other project's member", auth.Mint("u_mallory", "p_other", auth.RoleMember, time.Hour), 403},
 		{"producer", auth.Mint("w", "p_demo", auth.RoleProducer, time.Hour), 403},
 		{"expired member", auth.Mint("u_alice", "p_demo", auth.RoleMember, -time.Minute), 401},
-		{"forged token", "eyJhbGciOiJub25lIn0.eyJwcm9qZWN0IjoicF9kZW1vIiwicm9sZSI6Im1lbWJlciJ9.", 401},
+		{"unsigned token (alg none)", unsigned(`{"project":"p_demo","role":"member"}`), 401},
 	}
 	for _, c := range cases {
 		code, out := call(t, ts, "POST", "/unwrap", c.tok, map[string]string{"key_id": keyID})
