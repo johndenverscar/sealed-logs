@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Creates the kind cluster (once), builds and loads the image, applies the
+# manifests and waits for every deployment. Then run ./bin/tui.
+#   SEED=1     also write three past days of SDK logs
+#   CHATTER=1  make the fake agent log on its own
+set -euo pipefail
+cd "$(dirname "$0")"
+CLUSTER=sealed
+CTX=kind-$CLUSTER
+k() { kubectl --context "$CTX" -n sealed-logs "$@"; }
+
+if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+  prev=$(kubectl config current-context 2>/dev/null || true)
+  kind create cluster --config deploy/kind.yaml
+  # kind switches the current context; put it back. Everything here uses --context.
+  [[ -n $prev ]] && kubectl config use-context "$prev" >/dev/null
+fi
+docker build -q -t sealedlogs:dev . >/dev/null
+kind load docker-image sealedlogs:dev --name "$CLUSTER" >/dev/null
+kubectl --context "$CTX" apply -k deploy >/dev/null
+
+# Same tag, new image: restart the app deployments so they pick it up.
+k rollout restart deploy/keysvc deploy/collector deploy/aggregator deploy/agent >/dev/null
+k set env deploy/agent -c agent AGENT_CHATTER="$([[ ${CHATTER:-0} == 1 ]] && echo 1 || true)" >/dev/null
+for d in clickhouse objectstore openbao keysvc collector aggregator agent; do
+  k rollout status "deploy/$d" --timeout=300s >/dev/null
+done
+
+if [[ ${SEED:-0} == 1 ]]; then
+  for d in 1 2 3; do k exec deploy/collector -- producer sdk --days-ago "$d" --n 30 >/dev/null; done
+fi
+
+mkdir -p bin
+go build -o bin/ ./cmd/tui ./cmd/logs
+k get pods
+echo
+echo "up. ./bin/tui for the harness, ./bin/logs --as member for the CLI, ./down.sh to delete the cluster"

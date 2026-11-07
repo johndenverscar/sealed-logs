@@ -1,0 +1,108 @@
+# The three prototype services. Pods labelled sealed-logs/events=true print JSON
+# lifecycle events on stdout; the TUI follows them with kubectl logs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: keysvc-data }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 256Mi } }
+---
+# One replica: key records live in SQLite on a PVC. Production would use
+# CockroachDB and run several replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: keysvc }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: keysvc } }
+  template:
+    metadata: { labels: { app: keysvc, sealed-logs/events: "true" } }
+    spec:
+      securityContext: { fsGroup: 65532 }
+      initContainers:
+        - name: wait-for-openbao
+          image: sealedlogs:dev
+          command: [bash, -c, "until (exec 3<>/dev/tcp/openbao/8200) 2>/dev/null; do sleep 1; done"]
+      containers:
+        - name: keysvc
+          image: sealedlogs:dev
+          command: [keysvc]
+          envFrom: [{ configMapRef: { name: sealed-env } }, { secretRef: { name: sealed-creds } }]
+          env:
+            - { name: KEYSVC_ADDR, value: ":7101" }
+            - { name: SEALED_HOME, value: /data }
+            - { name: DEMO_ALLOW_PAST, value: "1" }
+            - { name: RETENTION_DAYS, value: "7" }
+          ports: [{ containerPort: 7101 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 7101 }, periodSeconds: 2 }
+          volumeMounts: [{ name: data, mountPath: /data/var }]
+      volumes: [{ name: data, persistentVolumeClaim: { claimName: keysvc-data } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: keysvc }
+spec:
+  type: NodePort
+  selector: { app: keysvc }
+  ports: [{ port: 7101, nodePort: 30101 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: collector }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: collector } }
+  template:
+    metadata: { labels: { app: collector, sealed-logs/events: "true" } }
+    spec:
+      initContainers:
+        - name: wait-for-storage
+          image: sealedlogs:dev
+          command: [bash, -c, "for hp in clickhouse/9000 objectstore/8333; do until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do sleep 1; done; done"]
+      containers:
+        - name: collector
+          image: sealedlogs:dev
+          command: [collector]
+          envFrom: [{ configMapRef: { name: sealed-env } }, { secretRef: { name: sealed-creds } }]
+          env: [{ name: COLLECTOR_ADDR, value: ":7102" }]
+          ports: [{ containerPort: 7102 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 7102 }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: collector }
+spec:
+  type: NodePort
+  selector: { app: collector }
+  ports: [{ port: 7102, nodePort: 30102 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: aggregator }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: aggregator } }
+  template:
+    metadata: { labels: { app: aggregator, sealed-logs/events: "true" } }
+    spec:
+      initContainers:
+        - name: wait-for-deps
+          image: sealedlogs:dev
+          command: [bash, -c, "for hp in clickhouse/9000 objectstore/8333 keysvc/7101; do until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do sleep 1; done; done"]
+      containers:
+        - name: aggregator
+          image: sealedlogs:dev
+          command: [aggregator]
+          envFrom: [{ configMapRef: { name: sealed-env } }, { secretRef: { name: sealed-creds } }]
+          env: [{ name: AGGREGATOR_ADDR, value: ":7103" }]
+          ports: [{ containerPort: 7103 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 7103 }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: aggregator }
+spec:
+  type: NodePort
+  selector: { app: aggregator }
+  ports: [{ port: 7103, nodePort: 30103 }]
