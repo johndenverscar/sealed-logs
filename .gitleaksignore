@@ -1,0 +1,2 @@
+# An unsigned alg:none test JWT from an earlier commit; it signs nothing and grants nothing.
+5bb28a87fcdf709be1e5084f839b4796abe41b0d:cmd/keysvc/main_test.go:jwt:128
