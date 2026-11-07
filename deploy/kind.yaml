@@ -1,11 +1,12 @@
-# kind cluster for the sealed-logs prototype. Host ports match the old compose
-# setup, so the TUI and logs CLI need no port-forwards. Port mappings can only be
-# set at creation: change them with ./down.sh && ./up.sh.
+# kind cluster for the sealed-logs prototype. Host ports map to NodePorts, so the
+# TUI and logs CLI need no port-forwards. Port mappings can only be set at
+# creation: change them with ./down.sh && ./up.sh.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: sealed
 nodes:
   - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
     extraPortMappings:
       - { containerPort: 30101, hostPort: 7101, listenAddress: 127.0.0.1 }   # keysvc
       - { containerPort: 30102, hostPort: 7102, listenAddress: 127.0.0.1 }   # collector

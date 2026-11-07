@@ -86,28 +86,12 @@ func (s *server) chunks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if reason := unsealedReason(body); reason != "" {
+	ch, reason := validate(c, body)
+	if reason != "" {
 		s.reject(w, c.Project, reason)
 		return
 	}
-	var ch envelope.Chunk
-	if err := json.Unmarshal(body, &ch); err != nil {
-		s.reject(w, c.Project, "malformed chunk")
-		return
-	}
-	m, sl := ch.Meta, ch.Sealed
-	switch {
-	case m.Project != c.Project:
-		s.reject(w, c.Project, "chunk project does not match token")
-		return
-	case sl.V != envelope.Version || len(sl.Enc) != 32 || len(sl.CT) < 16:
-		s.reject(w, c.Project, "not a valid sealed envelope")
-		return
-	case sl.KeyID != m.KeyID || !strings.HasPrefix(m.KeyID, m.Project+"/"):
-		s.reject(w, c.Project, "key_id does not belong to this project")
-		return
-	}
-
+	m := ch.Meta
 	events.Emit("collector", "accepted", map[string]any{
 		"chunk_id": m.ChunkID, "sub": c.Subject, "bytes": len(body), "key_id": m.KeyID,
 		"checks": []string{"body has only meta and sealed", "token project = meta.project", "sealed envelope v1 shape", "key_id belongs to project"},
@@ -141,6 +125,29 @@ func (s *server) chunks(w http.ResponseWriter, r *http.Request) {
 		"chunk_id": m.ChunkID, "key_id": m.KeyID, "lines": m.Lines, "levels": m.Levels, "session_id": m.SessionID,
 	})
 	writeJSON(w, 201, map[string]any{"object_key": objectKey})
+}
+
+// validate returns the chunk, or why it is refused. The collector cannot decrypt,
+// so it checks shape and ownership only: the body is exactly {meta, sealed}, the
+// token's project owns the chunk, and the key ID belongs to that project.
+func validate(c *auth.Claims, body []byte) (envelope.Chunk, string) {
+	var ch envelope.Chunk
+	if reason := unsealedReason(body); reason != "" {
+		return ch, reason
+	}
+	if err := json.Unmarshal(body, &ch); err != nil {
+		return ch, "malformed chunk"
+	}
+	m, sl := ch.Meta, ch.Sealed
+	switch {
+	case m.Project != c.Project:
+		return ch, "chunk project does not match token"
+	case sl.V != envelope.Version || len(sl.Enc) != 32 || len(sl.CT) < 16:
+		return ch, "not a valid sealed envelope"
+	case sl.KeyID != m.KeyID || !strings.HasPrefix(m.KeyID, m.Project+"/"):
+		return ch, "key_id does not belong to this project"
+	}
+	return ch, ""
 }
 
 // unsealedReason rejects anything that is not exactly {meta, sealed}. A producer

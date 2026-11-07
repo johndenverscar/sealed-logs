@@ -1,8 +1,10 @@
 // Package envelope seals a chunk of log lines to a project's daily public key.
 //
 // Format: JSONL lines, zstd-compressed, then one HPKE seal per chunk
-// (X25519 + HKDF-SHA256 + AES-256-GCM). The metadata is bound as AAD, so
-// moving a chunk to another project or key fails to open.
+// (X25519 + HKDF-SHA256 + AES-256-GCM). Every metadata field is bound as
+// additional authenticated data (AAD): the metadata stays readable so storage can
+// index it, but changing any field, or moving the chunk to another project or
+// key, makes Open fail.
 package envelope
 
 import (
@@ -10,7 +12,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/cloudflare/circl/hpke"
@@ -75,7 +80,23 @@ func GenerateKeyPair() (pub, priv []byte, err error) {
 	return pub, priv, err
 }
 
-func aad(m Meta) []byte { return []byte(m.Project + "|" + m.ChunkID + "|" + m.KeyID) }
+// aad serialises every Meta field in a fixed order. It does not use JSON so the
+// bytes cannot drift with map ordering or time zone formatting.
+func aad(m Meta) []byte {
+	var b strings.Builder
+	fmt.Fprintf(&b, "sealed-logs/v1|%q|%q|%q|%q|%q|%q|%s|%s|%d",
+		m.Project, m.ChunkID, m.KeyID, m.SessionID, m.AgentID, m.Source,
+		m.TSMin.UTC().Format(time.RFC3339Nano), m.TSMax.UTC().Format(time.RFC3339Nano), m.Lines)
+	levels := make([]string, 0, len(m.Levels))
+	for l := range m.Levels {
+		levels = append(levels, l)
+	}
+	slices.Sort(levels)
+	for _, l := range levels {
+		fmt.Fprintf(&b, "|%q=%d", l, m.Levels[l])
+	}
+	return []byte(b.String())
+}
 
 // Seal returns the sealed chunk and the uncompressed plaintext size.
 func Seal(pub []byte, m Meta, lines []Line) (Sealed, int, error) {

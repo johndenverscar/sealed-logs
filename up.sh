@@ -9,6 +9,20 @@ CLUSTER=sealed
 CTX=kind-$CLUSTER
 k() { kubectl --context "$CTX" -n sealed-logs "$@"; }
 
+# Preflight: fail now with a clear message rather than halfway through.
+fail() { echo "up.sh: $*" >&2; exit 1; }
+for tool in docker kind kubectl go; do
+  command -v "$tool" >/dev/null || fail "$tool is not installed (needs docker, kind, kubectl, go)"
+done
+docker info >/dev/null 2>&1 || fail "docker is not running"
+if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+  for port in 7101 7102 7103 7104 18123 19100; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      fail "port $port is in use; the cluster maps it to the host (see deploy/kind.yaml)"
+    fi
+  done
+fi
+
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   prev=$(kubectl config current-context 2>/dev/null || true)
   kind create cluster --config deploy/kind.yaml

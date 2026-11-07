@@ -2,3 +2,5 @@ bin
 var
 deploy
 *.md
+docs
+.github

@@ -61,3 +61,50 @@ func TestLifecycle(t *testing.T) {
 	m.stage = 1
 	t.Log("\n" + m.View())
 }
+
+// TestPurge follows walkthrough step 8: purge today, the member's read of the
+// old line comes back "destroyed", and a new line gets a new key generation.
+func TestPurge(t *testing.T) {
+	if os.Getenv("SEALED_LIVE") == "" {
+		t.Skip("set SEALED_LIVE=1 with the cluster running")
+	}
+	m := newModel()
+	m.w, m.h = 160, 50
+	time.Sleep(2 * time.Second)
+	send := func(msg string) *trace {
+		m.comp.session, m.comp.msg = "ses_purge", msg
+		m.send()
+		tr := m.cur()
+		if tr == nil {
+			t.Fatalf("send failed: %s", m.status)
+		}
+		for i := 0; i < 60 && len(m.derive(tr).byStage["collector"]) < 3; i++ {
+			time.Sleep(250 * time.Millisecond)
+			m.drain()
+		}
+		return tr
+	}
+	read := func() *readResult { return m.query("member")().(resultMsg).read }
+
+	old := send("before the purge")
+	if r := read(); r == nil || len(r.lines) == 0 {
+		t.Fatalf("member cannot read before purge: %+v", r)
+	}
+	t.Log(purgeToday()().(resultMsg).status)
+	time.Sleep(3 * time.Second) // one revocation poll
+	m.sel = 0
+	if r := read(); r == nil || r.chunkStatus != "destroyed" {
+		t.Fatalf("after purge: %+v", r)
+	}
+
+	time.Sleep(4 * time.Second) // the sidecar caches the public key for 5s
+	nw := send("after the purge")
+	if r := read(); r == nil || len(r.lines) == 0 {
+		t.Fatalf("member cannot read the new line: %+v", r)
+	}
+	if k := m.derive(nw).keyID; k == m.derive(old).keyID {
+		t.Fatalf("new line reused the purged key %s", k)
+	} else {
+		t.Logf("old key %s, new key %s", m.derive(old).keyID, k)
+	}
+}

@@ -44,24 +44,36 @@ func main() {
 
 	db, err := sql.Open("sqlite", config.Var("keysvc.db")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	must(err)
-	_, err = db.Exec(`
+	tr := wrap.NewTransit(config.BaoAddr, config.BaoToken)
+	must(tr.Init(ctx))
+	retention, _ := strconv.Atoi(config.Env("RETENTION_DAYS", "7"))
+	s, err := newServer(db, tr, loadSigningKey(), os.Getenv("DEMO_ALLOW_PAST") == "1", retention)
+	must(err)
+
+	go s.retentionLoop()
+
+	addr := config.Env("KEYSVC_ADDR", "127.0.0.1:7101")
+	log.Printf("keysvc on %s, wrapper=%s, retention=%dd", addr, tr.Name(), retention)
+	log.Fatal(http.ListenAndServe(addr, s.routes()))
+}
+
+const schema = `
 CREATE TABLE IF NOT EXISTS keys(
   key_id TEXT PRIMARY KEY, project TEXT, day TEXT, gen INTEGER,
   pub BLOB, sig BLOB, wrapped TEXT, created_at TEXT, destroyed_at TEXT, destroy_reason TEXT);
 CREATE TABLE IF NOT EXISTS revocations(seq INTEGER PRIMARY KEY AUTOINCREMENT, key_id TEXT, ts TEXT);
 CREATE TABLE IF NOT EXISTS audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, sub TEXT, caller_project TEXT, role TEXT,
-  key_id TEXT, action TEXT, allowed INTEGER, reason TEXT);`)
-	must(err)
+  key_id TEXT, action TEXT, allowed INTEGER, reason TEXT);`
 
-	tr := wrap.NewTransit(config.BaoAddr, config.BaoToken)
-	must(tr.Init(ctx))
+func newServer(db *sql.DB, w wrap.KeyWrapper, sign ed25519.PrivateKey, allowPast bool, retention int) (*server, error) {
+	if _, err := db.Exec(schema); err != nil {
+		return nil, err
+	}
+	return &server{db: db, wrapper: w, sign: sign, allowPast: allowPast, retention: retention}, nil
+}
 
-	retention, _ := strconv.Atoi(config.Env("RETENTION_DAYS", "7"))
-	s := &server{db: db, wrapper: tr, sign: loadSigningKey(), allowPast: os.Getenv("DEMO_ALLOW_PAST") == "1", retention: retention}
-
-	go s.retentionLoop()
-
+func (s *server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /signing-key", s.signingKey)
@@ -71,10 +83,7 @@ CREATE TABLE IF NOT EXISTS audit(
 	mux.HandleFunc("GET /keys", s.list)
 	mux.HandleFunc("GET /revocations", s.revocations)
 	mux.HandleFunc("GET /audit", s.auditLog)
-
-	addr := config.Env("KEYSVC_ADDR", "127.0.0.1:7101")
-	log.Printf("keysvc on %s, wrapper=%s, retention=%dd", addr, tr.Name(), retention)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	return mux
 }
 
 func loadSigningKey() ed25519.PrivateKey {

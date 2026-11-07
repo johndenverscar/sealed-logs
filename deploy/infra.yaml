@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: clickhouse
-          image: clickhouse/clickhouse-server:24.8
+          image: clickhouse/clickhouse-server:24.8@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
           env:
             - { name: CLICKHOUSE_USER, valueFrom: { secretKeyRef: { name: sealed-creds, key: CH_USER } } }
             - { name: CLICKHOUSE_PASSWORD, valueFrom: { secretKeyRef: { name: sealed-creds, key: CH_PASS } } }
@@ -58,7 +58,7 @@ spec:
     spec:
       containers:
         - name: seaweedfs
-          image: chrislusf/seaweedfs:3.80
+          image: chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
           args: ["server", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-dir=/data", "-volume.max=0"]
           ports: [{ containerPort: 8333 }]
           readinessProbe: { tcpSocket: { port: 8333 }, periodSeconds: 2 }
@@ -90,7 +90,7 @@ spec:
     spec:
       containers:
         - name: openbao
-          image: openbao/openbao:2.1.0
+          image: openbao/openbao:2.1.0@sha256:7de07aa6df3937d44c96c2d65c188b2d4a70546f2a764ad4510301305af6a223
           args: ["server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200"]
           securityContext: { capabilities: { add: [IPC_LOCK] } }
           ports: [{ containerPort: 8200 }]
