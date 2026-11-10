@@ -69,9 +69,13 @@ func (e ev) list(k string) []string {
 func follow(add func(ev)) {
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		cmd := exec.CommandContext(ctx, "kubectl", "--context", config.KubeContext, "-n", config.Namespace,
+		args := []string{"-n", config.Namespace}
+		if config.KubeContext != "" { // empty in the cluster: kubectl uses the pod's ServiceAccount
+			args = append([]string{"--context", config.KubeContext}, args...)
+		}
+		cmd := exec.CommandContext(ctx, "kubectl", append(args,
 			"logs", "-f", "--all-containers", "--prefix=false", "--ignore-errors", "--max-log-requests=30",
-			"--since=3m", "-l", "sealed-logs/events=true")
+			"--since=3m", "-l", "sealed-logs/events=true")...)
 		stdout, err := cmd.StdoutPipe()
 		if err == nil && cmd.Start() == nil {
 			sc := bufio.NewScanner(stdout)

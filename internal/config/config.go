@@ -23,8 +23,9 @@ var (
 	AggregatorURL = Env("AGGREGATOR_URL", "http://127.0.0.1:7103")
 	AgentURL      = Env("AGENT_URL", "http://127.0.0.1:7104") // the fake agent's harness endpoint
 
-	// Where the demo follows events with kubectl logs.
-	KubeContext = Env("KUBE_CONTEXT", "kind-sealed")
+	// Where the demo follows events with kubectl logs. In the cluster the demo sets
+	// KUBE_CONTEXT=in-cluster, which means "use the pod's ServiceAccount".
+	KubeContext = kubeContext()
 	Namespace   = Env("NAMESPACE", "sealed-logs")
 
 	CHAddr = Env("CH_ADDR", "127.0.0.1:19000")
@@ -42,3 +43,10 @@ var (
 
 	DemoProject = Env("DEMO_PROJECT", "p_demo")
 )
+
+func kubeContext() string {
+	if c := Env("KUBE_CONTEXT", "kind-sealed"); c != "in-cluster" {
+		return c
+	}
+	return ""
+}

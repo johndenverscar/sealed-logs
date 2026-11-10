@@ -79,10 +79,12 @@ You'll need Docker, [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#insta
 kubectl and Go 1.26. I've run it on macOS and Linux.
 
 ```sh
-./up.sh      # create the cluster, build, deploy and wait (about a minute once images are pulled)
-./bin/demo   # the web demo, on http://127.0.0.1:7100
+./up.sh      # create the cluster, build, deploy, wait, and open the demo on http://127.0.0.1:7100
 ./down.sh    # delete the cluster and everything in it
 ```
+
+The demo page runs in the cluster with everything else. A new cluster also gets
+three past days of logs, so the Logs tab's 7d view has something in it.
 
 `up.sh` checks that you have everything before it starts, and you can rerun it
 after changing code. It won't touch your other clusters: every kubectl call uses
@@ -99,11 +101,12 @@ There's also a CLI if you'd rather stay in the terminal:
 ./bin/logs --scan                    # what someone with the bucket and ClickHouse would see
 ./bin/logs --purge $(date -u +%F)    # destroy today's key
 open 'http://127.0.0.1:18123/play?user=sealed&password=sealed'   # ClickHouse's SQL UI
-SEED=1 ./up.sh                       # also write three past days of logs
+SEED=1 ./up.sh                       # write three more past days of logs
+OPEN=0 ./up.sh                       # don't open the browser
 CHATTER=1 ./up.sh                    # have the fake agent log on its own
 ```
 
-Everything listens on 127.0.0.1: keysvc on 7101, the collector on 7102, the
+Everything listens on 127.0.0.1: the demo on 7100, keysvc on 7101, the collector on 7102, the
 aggregator on 7103, the agent on 7104 (`POST /log`), ClickHouse on 18123 and the
 object store on 19100.
 

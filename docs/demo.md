@@ -15,13 +15,13 @@ that:
 
 ## Getting set up
 
-Start the cluster and the demo server, then open the page:
+Start everything:
 
 ```sh
 ./up.sh
-./bin/demo
-open http://127.0.0.1:7100
 ```
+
+It opens http://127.0.0.1:7100 when it's done.
 
 The page has two tabs.
 
@@ -198,5 +198,5 @@ within 2 seconds. New logs get a fresh key, so they aren't affected.
 - [break-it.md](break-it.md) takes the protections out one at a time, so you can
   see what each one is worth and which test notices.
 - [design.md](design.md#threat-model) covers what this *doesn't* protect against.
-- `SEED=1 ./up.sh` writes three past days of logs. Pick **7d** on the **Logs**
+- A new cluster starts with three past days of logs. Pick **7d** on the **Logs**
   tab to see them, or purge a single day with `./bin/logs --purge <YYYY-MM-DD>`.

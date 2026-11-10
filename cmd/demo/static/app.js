@@ -91,7 +91,7 @@ async function poll() {
     pv.stages = s.stages;
     pv.traces = s.traces;
     if (!pv.trace && s.traces.length) pv.trace = s.traces[s.traces.length - 1].id;
-    $('#ctx').textContent = `project ${s.project} · cluster ${s.kube_context}`;
+    $('#ctx').textContent = `project ${s.project} · cluster ${s.kube_context || 'in-cluster'}`;
     $('#proj').textContent = s.project;
     $('#lv-proj').textContent = s.project;
     renderPipeline();

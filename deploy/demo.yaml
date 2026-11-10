@@ -1,0 +1,47 @@
+# The web demo. It follows the pipeline's events with kubectl logs, so its
+# ServiceAccount may read pods and their logs in this namespace, and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: demo }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: demo-follow-events }
+rules:
+  - { apiGroups: [""], resources: [pods], verbs: [get, list, watch] }
+  - { apiGroups: [""], resources: [pods/log], verbs: [get] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: demo-follow-events }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: demo-follow-events }
+subjects: [{ kind: ServiceAccount, name: demo }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: demo }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: demo } }
+  template:
+    metadata: { labels: { app: demo } }
+    spec:
+      serviceAccountName: demo
+      containers:
+        - name: demo
+          image: sealedlogs:dev
+          command: [demo]
+          envFrom: [{ configMapRef: { name: sealed-env } }, { secretRef: { name: sealed-creds } }]
+          env:
+            - { name: DEMO_ADDR, value: ":7100" }
+            - { name: KUBE_CONTEXT, value: in-cluster }
+          ports: [{ containerPort: 7100 }]
+          readinessProbe: { httpGet: { path: /, port: 7100 }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: demo }
+spec:
+  type: NodePort
+  selector: { app: demo }
+  ports: [{ port: 7100, nodePort: 30107 }]
