@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>sealed-logs demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">sealed-logs <span class="muted">demo</span></div>
+  <nav class="views" role="tablist">
+    <button role="tab" data-view="pipeline" aria-selected="true">Pipeline</button>
+    <button role="tab" data-view="logs" aria-selected="false">Logs</button>
+  </nav>
+  <div class="ctx muted" id="ctx"></div>
+</header>
+
+<!-- ============ Pipeline: follow one line through every component ============ -->
+<main id="view-pipeline" class="view">
+  <section class="pipeline" id="pipeline" aria-label="Pipeline"></section>
+  <div class="legend">
+    <span><i class="sw plain"></i>plaintext</span>
+    <span><i class="sw sealed"></i>sealed</span>
+    <span><i class="sw key"></i>key material</span>
+    <span><i class="sw denied"></i>denied or destroyed</span>
+    <span class="muted">Click a box to inspect it.</span>
+  </div>
+
+  <div class="grid">
+    <section class="card compose">
+      <h2>Agent <span class="muted">· write a log line</span></h2>
+      <p class="muted small">Pod identity, set by the sidecar: project <span class="mono" id="proj"></span> · agent <span class="mono">ag_demo</span></p>
+      <form id="compose">
+        <div class="row2">
+          <label>Level
+            <select name="level"><option>debug</option><option selected>info</option><option>warn</option><option>error</option></select>
+          </label>
+          <label>Stream
+            <select name="stream"><option>stdout</option><option>stderr</option></select>
+          </label>
+        </div>
+        <label>Session <input name="session" value="ses_demo" autocomplete="off"></label>
+        <label>Attributes <span class="muted">(key=value …)</span>
+          <input name="attrs" value="order_id=88231 caller=caller_1" autocomplete="off"></label>
+        <label>Message
+          <textarea name="msg" rows="2">payment captured card=4111 1111 1111 1111 exp=12/28</textarea></label>
+        <div class="preview mono small" id="preview"></div>
+        <button class="btn primary" type="submit">Send</button>
+      </form>
+
+      <h2 class="mt">Actions</h2>
+      <div class="actions">
+        <span class="muted small label">Read the selected line as</span>
+        <button class="btn" data-read="member">Project member</button>
+        <button class="btn" data-read="staff">Operator staff</button>
+        <button class="btn" data-read="other">Other project</button>
+      </div>
+      <div class="actions">
+        <button class="btn" id="scan">Scan storage</button>
+        <button class="btn" id="plaintext">Send plaintext (old client)</button>
+        <button class="btn danger" id="purge">Purge today</button>
+      </div>
+    </section>
+
+    <section class="card inspect">
+      <div class="inspect-head">
+        <h2>Inspect <span id="ins-stage"></span></h2>
+        <span class="muted small" id="ins-source"></span>
+      </div>
+      <div class="lines" id="ins-lines"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="inspect-head">
+      <h2>Lifecycle</h2>
+      <label class="small muted">Line <select id="trace-sel"></select></label>
+    </div>
+    <ol class="steps" id="steps"></ol>
+  </section>
+</main>
+
+<!-- ============ Logs: the customer's log viewer ============ -->
+<main id="view-logs" class="view" hidden>
+  <div class="lv-head">
+    <h1>Logs <span class="chip mono" id="lv-proj"></span></h1>
+    <div class="lv-controls">
+      <label class="small muted">Viewing as
+        <select id="lv-as">
+          <option value="member">u_alice · project member</option>
+          <option value="staff">s_bob · operator staff</option>
+          <option value="other">u_mallory · other project</option>
+        </select>
+      </label>
+      <div class="seg" id="lv-range" role="group" aria-label="Time range">
+        <button data-since="15m">15m</button><button data-since="1h" aria-pressed="true">1h</button><button data-since="4h">4h</button><button data-since="24h">1d</button><button data-since="168h">7d</button>
+      </div>
+      <button class="btn" id="lv-refresh">Refresh</button>
+      <label class="small toggle"><input type="checkbox" id="lv-auto"> Auto-refresh</label>
+    </div>
+  </div>
+
+  <div class="lv-filter">
+    <input id="lv-q" placeholder="Filter your logs: free text, or level:error session:ses_demo source:sidecar" autocomplete="off">
+    <div class="chips" id="lv-chips"></div>
+  </div>
+
+  <div class="lv-hist" id="lv-hist" aria-label="Log volume by level"></div>
+
+  <div class="lv-body">
+    <aside class="lv-fields" id="lv-fields"></aside>
+    <section class="lv-table-wrap">
+      <div class="lv-note small muted" id="lv-note"></div>
+      <table class="lv-table">
+        <thead><tr><th class="lvl"></th><th>Time</th><th>Source</th><th>Session</th><th>Message</th></tr></thead>
+        <tbody id="lv-rows"></tbody>
+      </table>
+      <div class="lv-empty muted" id="lv-empty"></div>
+    </section>
+    <aside class="lv-detail" id="lv-detail" hidden></aside>
+  </div>
+</main>
+
+<div class="status" id="status" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>

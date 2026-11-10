@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: sealed-logs
+labels:
+  - pairs: { app.kubernetes.io/part-of: sealed-logs }
+resources:
+  - namespace.yaml
+  - infra.yaml
+  - services.yaml
+  - agent.yaml
+configMapGenerator:
+  - name: objectstore-identities
+    files: [s3.json]
+  - name: sealed-env
+    literals:
+      - KEYSVC_URL=http://keysvc:7101
+      - COLLECTOR_URL=http://collector:7102
+      - AGGREGATOR_URL=http://aggregator:7103
+      - CH_ADDR=clickhouse:9000
+      - CH_HTTP=http://clickhouse:8123
+      - MINIO_ENDPOINT=objectstore:8333
+      - BAO_ADDR=http://openbao:8200
+secretGenerator:
+  # Demo values. The host demo mints tokens with the same default HMAC secret.
+  - name: sealed-creds
+    literals:
+      - CH_USER=sealed
+      - CH_PASS=sealed
+      - MINIO_USER=sealed
+      - MINIO_PASS=sealed-secret
+      - BAO_TOKEN=root
+      - SEALED_TOKEN_SECRET=dev-only-not-a-secret

@@ -1,0 +1,45 @@
+# A hosted customer agent: the agent container plus the log sidecar, like a
+# pod on a hosted agent platform. The agent's stdout and stderr are redirected into FIFOs on a
+# shared emptyDir, so the container runtime never writes its log text to the
+# node's disk. The sidecar reads the FIFOs, seals and ships.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: agent }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: agent } }
+  template:
+    metadata: { labels: { app: agent, sealed-logs/events: "true" } }
+    spec:
+      initContainers:
+        - name: make-fifos
+          image: sealedlogs:dev
+          command: [bash, -c, "mkfifo -m 0600 /logs/stdout.pipe /logs/stderr.pipe 2>/dev/null || true"]
+          volumeMounts: [{ name: logs, mountPath: /logs }]
+      containers:
+        - name: agent
+          image: sealedlogs:dev
+          # The entrypoint wrapper is the only change a customer image would need.
+          # Opening a FIFO blocks until the sidecar opens the other end.
+          command: [bash, -c, 'exec producer fakeagent --listen :8080 ${AGENT_CHATTER:+--chatter} >/logs/stdout.pipe 2>/logs/stderr.pipe']
+          env: [{ name: AGENT_CHATTER, value: "" }]
+          ports: [{ containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 2 }
+          volumeMounts: [{ name: logs, mountPath: /logs }]
+        - name: log-sidecar
+          image: sealedlogs:dev
+          command: [producer, sidecar, --project, p_demo, --agent, ag_demo, --session, ses_demo,
+                    --stdout, /logs/stdout.pipe, --stderr, /logs/stderr.pipe]
+          envFrom: [{ configMapRef: { name: sealed-env } }, { secretRef: { name: sealed-creds } }]
+          volumeMounts: [{ name: logs, mountPath: /logs }]
+      volumes:
+        - name: logs
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: agent }
+spec:
+  type: NodePort
+  selector: { app: agent }
+  ports: [{ port: 8080, nodePort: 30104 }]

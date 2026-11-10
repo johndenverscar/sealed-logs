@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "sealed",
+      "credentials": [{ "accessKey": "sealed", "secretKey": "sealed-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
