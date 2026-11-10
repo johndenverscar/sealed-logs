@@ -119,9 +119,8 @@ SEALED_LIVE=1 go test ./cmd/demo -v -count=1  # end to end, against the running 
 
 The unit tests go straight at the security properties: tampering is caught, the
 wrong key fails, staff and other tenants are refused, a purge is announced to the
-aggregator, and the collector refuses plaintext. CI runs those, plus gofmt,
-go vet and gitleaks. The end-to-end tests need the kind cluster, so they only run
-locally.
+aggregator, and the collector refuses plaintext. The end-to-end tests need the
+kind cluster running.
 
 ## License
 
