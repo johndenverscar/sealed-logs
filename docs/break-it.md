@@ -126,7 +126,7 @@ docker exec sealed-control-plane grep -rl "4111 1111" /var/log/pods
 ```
 
 The card number shows up in `kubectl logs` and in a file under `/var/log/pods` on
-the node. In CI, the "no plaintext on the node's disk" step fails.
+the node.
 
 Every storage check still passes, because the sidecar still encrypted everything
 it shipped. The leak happens before encryption: the container runtime grabbed

@@ -160,8 +160,8 @@ container's entrypoint sends stdout and stderr into named pipes on an in-memory
 `emptyDir`, and the sidecar reads from those. The runtime never sees the text:
 `kubectl logs` for the agent container is empty, and nothing lands on the node.
 
-→ [`deploy/agent.yaml`](../deploy/agent.yaml); CI checks the node's disk for the
-test card number
+→ [`deploy/agent.yaml`](../deploy/agent.yaml); step 7 of the [demo](demo.md) checks the
+node's disk for the test card number
 
 ## Threat model
 

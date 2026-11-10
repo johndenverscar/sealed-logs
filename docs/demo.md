@@ -187,7 +187,7 @@ within 2 seconds. New logs get a fresh key, so they aren't affected.
 |---|---|---|
 | The line is encrypted in the pod, and only metadata leaves readable | Steps 1–2 | `TestCiphertextHidesText` |
 | No plaintext in the bucket or the index | Steps 3 and 6 | `TestLifecycle` (live scan) |
-| No plaintext on the node's disk | Step 7 | CI's node-disk check |
+| No plaintext on the node's disk | Step 7 | The `grep` in step 7 |
 | Only members of the key's project can decrypt, and every decision is audited | Steps 4–5 | `TestUnwrapPolicy`, `TestLifecycle`, `TestLogsView` |
 | Plaintext is refused at the door | Step 8 | `TestValidate`, `TestLifecycle` |
 | Destroying a key deletes its logs everywhere, within about 2 seconds | Step 9 | `TestPurge` (keysvc and live) |
