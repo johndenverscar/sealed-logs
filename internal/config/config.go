@@ -40,8 +40,13 @@ var (
 
 	KafkaBrokers = Env("KAFKA_BROKERS", "127.0.0.1:19092")
 
-	BaoAddr  = Env("BAO_ADDR", "http://127.0.0.1:18200")
-	BaoToken = Env("BAO_TOKEN", "root")
+	BaoAddr = Env("BAO_ADDR", "http://127.0.0.1:18200")
+
+	// The customer's own KMS, for BYOK. Only the demo server, playing the
+	// customer, holds this root token; keysvc gets a scoped token from it.
+	CustomerKMSAddr  = Env("CUSTOMER_KMS_ADDR", "http://127.0.0.1:18201")
+	CustomerKMSToken = Env("CUSTOMER_KMS_TOKEN", "customer-root")
+	BaoToken         = Env("BAO_TOKEN", "root")
 
 	DemoProject = Env("DEMO_PROJECT", "p_demo")
 )

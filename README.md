@@ -10,6 +10,12 @@ A very basic implementation of log encryption for customer platforms.
   approves it, it ends on its own, and the member can cut it short.
 - Logs can be tailed live, decrypted for whoever is watching, the same way a
   query is.
+- Projects have admins and viewers. Only admins purge, approve support access,
+  read the access log or manage keys.
+- An access log shows the project everyone who touched its keys, operator staff
+  included. It's hash-chained, so edits and deletions show.
+- A project can bring its own KMS key. Take decrypt away in that KMS and nobody,
+  the operator included, can read the project's logs until it's given back.
 - Deleting a day's key deletes that day's logs everywhere, backups included.
 
 It runs on your laptop in a [kind](https://kind.sigs.k8s.io) cluster and comes
@@ -39,6 +45,7 @@ flowchart LR
   aggregator -- "2. fetch chunks" --> bucket
   aggregator -- "3. unwrap with<br/>caller's token" --> keysvc["keysvc<br/>key policy, grants, audit"]
   keysvc -- "wrap / unwrap" --> kms[("KMS<br/>OpenBao Transit")]
+  keysvc -- "outer wrap (BYOK)" --> ckms[("customer's KMS<br/>OpenBao Transit")]
 ```
 
 Here's the trip a log line takes.
@@ -72,6 +79,7 @@ Here's the trip a log line takes.
 | `objectstore` (SeaweedFS) | | Any S3-compatible object store |
 | `openbao` | [`internal/wrap`](internal/wrap/wrap.go) | Any KMS, behind a small `KeyWrapper` interface |
 | `redpanda` | [`internal/stream`](internal/stream/stream.go) | Any Kafka-compatible stream |
+| `customer-kms` (OpenBao) | [`cmd/demo/byok.go`](cmd/demo/byok.go) | The customer's own KMS, in their own account |
 
 The chunk format (compression, encryption and the authenticated metadata) lives
 in [`internal/envelope`](internal/envelope/envelope.go). The web demo is
@@ -131,6 +139,33 @@ The unit tests go straight at the security properties: tampering is caught, the
 wrong key fails, staff and other tenants are refused, a purge is announced to the
 aggregator, and the collector refuses plaintext. The end-to-end tests need the
 kind cluster running.
+
+## Not built yet
+
+Things an enterprise logging product would also need, roughly in order:
+
+- **Retention controls and legal hold.** Retention per project instead of one
+  `RETENTION_DAYS`, a hold that blocks purges during an investigation, and a
+  signed receipt for every purge.
+- **Alerts on log content.** Alerts on counts by level can run off the index.
+  Alerts on text need somewhere allowed to decrypt, such as a project-scoped
+  worker holding its own grant.
+- **Log drains and export** to the customer's SIEM or bucket, either as
+  ciphertext with a way to decrypt it or re-encrypted for the destination.
+- **Faster search over long ranges**, saved searches and paginated results. A
+  per-project blind index would help, at the cost of leaking word frequency.
+- **More ways in.** An OpenTelemetry exporter, producers that buffer to
+  encrypted disk when the collector is down, and quotas and rate limits per
+  project.
+- **Monitoring of the pipeline itself.** Ingest lag, rejected chunks, unwrap
+  latency, cache hit rate and open tails, in Prometheus and Grafana.
+- **Data residency.** One keysvc and KMS per region, so an EU project's keys and
+  data stay in the EU.
+- **High availability.** Replicated keysvc storage and several replicas, the
+  topic partitioned by project, and a ClickHouse cluster.
+- **Real identity and transport security.** SSO for people, workload identity
+  for producers, mTLS between services and NetworkPolicy, instead of one shared
+  demo secret.
 
 ## License
 

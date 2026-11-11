@@ -1,6 +1,6 @@
 # Demo
 
-This takes about 25 minutes. You're going to play a customer whose code logs a
+This takes about 35 minutes. You're going to play a customer whose code logs a
 card number by accident, and then go looking for it. By the end you'll have seen
 that:
 
@@ -11,7 +11,10 @@ that:
 - once you purge the day, nobody can read it again, and new logs carry on as
   normal under a new key;
 - a live tail shows each person exactly what a query would;
-- support can read your logs only while you let them.
+- support can read your logs only while you let them;
+- only admins can do the dangerous things, and you can see everything anyone
+  did with your keys;
+- with your own KMS key, you can lock everyone out, the operator included.
 
 [design.md](design.md) has the longer explanation of each piece if you want it.
 
@@ -109,7 +112,7 @@ and keysvc has exactly one rule: members of the key's project, nobody else.
 
 Switch to the **Logs** tab.
 
-As `u_alice · project member` you get an ordinary log viewer: a volume chart, a
+As `u_alice · project admin` you get an ordinary log viewer: a volume chart, a
 table of lines with level, time, source and session, and filters down the side.
 Click your line to open its details and attributes. Type `level:error` or
 `session:ses_demo` into the filter box, or any text, and press Enter.
@@ -186,7 +189,7 @@ within 2 seconds. New logs get a fresh key, so they aren't affected.
 ## 10. Tail it live
 
 Open the **Logs** tab in two browser windows side by side. Set one to
-`u_alice · project member` and the other to `s_bob · operator staff`, and tick
+`u_alice · project admin` and the other to `s_bob · operator staff`, and tick
 **Live tail** in both. A green **● Live** shows up next to it.
 
 Now send a few lines from **Pipeline** (a third window, or switch back and
@@ -207,7 +210,7 @@ saying you can see when and where the project logged, but not what. Pick
 **2 min**, keep the reason, and click **Request access**. Nothing changes yet:
 the panel says it's waiting for a member of `p_demo`.
 
-Switch **Viewing as** to `u_alice · project member` (or use the other window).
+Switch **Viewing as** to `u_alice · project admin` (or use the other window).
 Alice sees Bob's request, with his reason. Click **Approve**.
 
 Switch back to Bob. The panel turns orange with a countdown, and the rows that
@@ -220,9 +223,49 @@ couple of seconds Bob's view reloads and everything is sealed again. The
 aggregator dropped what it had cached for him, and keysvc refuses him until
 someone approves a new grant.
 
-Bob can't approve his own request, and a member of another project can't
-approve it for p_demo. A grant only ever covers the one project that approved
-it.
+Bob can't approve his own request, and neither can an admin of another
+project. A grant only ever covers the one project that approved it.
+
+## 12. Admins and viewers
+
+On **Logs**, switch **Viewing as** to `u_carol · project viewer`. Carol reads
+the project's logs like Alice does. If Bob has a request waiting, Carol sees it,
+but instead of **Approve** she gets "Only p_demo admins can decide."
+
+Open the **Security** tab. The **Members** table shows who can do what. Switch
+its **Viewing as** to Carol: the access log answers "only admins of p_demo can
+read its access log", and **Use my own KMS key** is refused too.
+
+## 13. Read the access log
+
+Switch back to `u_alice · project admin`. The **Access log** lists every
+decision keysvc made about p_demo's keys and access, newest first: Alice's and
+Carol's decrypts, Bob's refusals and his grant, Carol's refused attempt from the
+last step. Tick **Operator staff and system only** to see just what the
+operator's side did.
+
+Above the table it says **Hash chain intact**. Each entry's hash covers the one
+before it, so an edited or deleted entry would break it from there on.
+`TestAccessLog` edits a row to prove that it's caught.
+
+## 14. Bring your own key, then lock everyone out
+
+Still on **Security** as Alice, click **Use my own KMS key**. The demo, playing
+the customer, creates a key in the customer's KMS (the `customer-kms` pod) and a
+token for keysvc that can only encrypt and decrypt with it. keysvc checks the
+key works, then rewraps every live day key with it. The card shows how many.
+
+The **Your KMS** box is the customer's side: the policy they've given the
+operator. Click **Revoke operator decrypt**. That removes the decrypt line from
+the policy, in the customer's KMS. Nobody tells keysvc.
+
+Within a few seconds the card turns red, and the access log shows keysvc
+noticing ("Own KMS key: decrypt unavailable"). On **Logs**, every row from a
+live day key now says **Locked by your key**, even for Alice. Send a line from
+**Pipeline**: it's still accepted and stored, and it's locked too.
+
+Click **Restore operator decrypt**, and a few seconds later everything reads
+again.
 
 ## What you saw
 
@@ -235,7 +278,10 @@ it.
 | Plaintext is refused at the door | Step 8 | `TestValidate`, `TestLifecycle` |
 | Destroying a key deletes its logs everywhere, within about 2 seconds | Step 9 | `TestPurge` (keysvc and live) |
 | A live tail decrypts for whoever is watching, and nobody else | Step 10 | Not automated |
-| Support reads a project's logs only while a member allows it | Step 11 | `TestSupportGrant` |
+| Support reads a project's logs only while an admin allows it | Step 11 | `TestSupportGrant` |
+| Viewers can't purge, approve, read the access log or change keys | Step 12 | `TestPurge`, `TestSupportGrant`, `TestAccessLog`, `TestBYOK` |
+| The access log shows edits and deletions | Step 13 | `TestAccessLog` |
+| Taking decrypt away in the customer's KMS locks everyone out, and logs keep arriving | Step 14 | `TestBYOK` |
 | Editing stored metadata stops the chunk from opening | Not in the demo | `TestMetadataIsBound` |
 
 ## Where to go next

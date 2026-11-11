@@ -19,10 +19,29 @@ const (
 	RoleProducer = "producer" // a sidecar or SDK writing logs
 )
 
+// A member's role inside their project. Viewers read logs. Admins can also purge,
+// approve support access, read the access log and manage the project's keys.
+// A member token without one is a viewer.
+const (
+	ProjectViewer = "viewer"
+	ProjectAdmin  = "admin"
+)
+
 type Claims struct {
-	Project string `json:"project"`
-	Role    string `json:"role"`
+	Project     string `json:"project"`
+	Role        string `json:"role"`
+	ProjectRole string `json:"project_role,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// IsMember is true for anyone in the project, whatever their project role.
+func (c *Claims) IsMember(project string) bool {
+	return c.Role == RoleMember && project != "" && c.Project == project
+}
+
+// IsAdmin is true for the project's admins only.
+func (c *Claims) IsAdmin(project string) bool {
+	return c.IsMember(project) && c.ProjectRole == ProjectAdmin
 }
 
 func secret() []byte {
@@ -30,9 +49,19 @@ func secret() []byte {
 }
 
 func Mint(sub, project, role string, ttl time.Duration) string {
+	return mint(sub, project, role, "", ttl)
+}
+
+// MintMember mints a customer user's token with their role in the project.
+func MintMember(sub, project, projectRole string, ttl time.Duration) string {
+	return mint(sub, project, RoleMember, projectRole, ttl)
+}
+
+func mint(sub, project, role, projectRole string, ttl time.Duration) string {
 	c := Claims{
-		Project: project,
-		Role:    role,
+		Project:     project,
+		Role:        role,
+		ProjectRole: projectRole,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   sub,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -71,10 +100,12 @@ func DemoToken(as string) string {
 	case "staff":
 		return Mint("s_bob@example.com", "", RoleStaff, time.Hour)
 	case "other":
-		return Mint("u_mallory", "p_other", RoleMember, time.Hour)
+		return MintMember("u_mallory", "p_other", ProjectAdmin, time.Hour) // an admin, of a different project
+	case "viewer":
+		return MintMember("u_carol", config.DemoProject, ProjectViewer, time.Hour)
 	case "producer":
 		return Mint("w_sidecar", config.DemoProject, RoleProducer, time.Hour)
 	default:
-		return Mint("u_alice", config.DemoProject, RoleMember, time.Hour)
+		return MintMember("u_alice", config.DemoProject, ProjectAdmin, time.Hour)
 	}
 }

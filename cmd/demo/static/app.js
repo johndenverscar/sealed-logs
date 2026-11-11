@@ -42,8 +42,10 @@ function showView(v) {
   $$('.views button').forEach((b) => b.setAttribute('aria-selected', b.dataset.view === v));
   $('#view-pipeline').hidden = v !== 'pipeline';
   $('#view-logs').hidden = v !== 'logs';
+  $('#view-security').hidden = v !== 'security';
   if (location.hash !== '#' + v) history.replaceState(null, '', '#' + v);
   if (v === 'logs') { lv.load(); loadGrants(); } else stopTail();
+  if (v === 'security') loadSecurity();
 }
 $$('.views button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 
@@ -94,6 +96,7 @@ async function poll() {
     $('#ctx').textContent = `project ${s.project} · cluster ${s.kube_context || 'in-cluster'}`;
     $('#proj').textContent = s.project;
     $('#lv-proj').textContent = s.project;
+    $('#sec-proj').textContent = s.project;
     renderPipeline();
     renderTraces();
     renderSteps();
@@ -268,12 +271,13 @@ lv.render = function () {
     }
     const c = r.chunk;
     const destroyed = c.status === 'destroyed';
+    const locked = c.status === 'locked';
     return h('tr', { class: 'sealed-row denied' + (i === lv.sel ? ' sel' : '') + (lv.fresh.has(rowKey(r)) ? ' fresh' : ''), onclick: () => select(i) },
       h('td', { class: 'lvl' }, h('span', { class: 'lvbar ' + (destroyed ? 'denied' : 'sealed') })),
       h('td', { class: 'time' }, clock(r.ts, longRange)), h('td', {}, src),
       h('td', { class: 'mono small' }, r.session || ''),
-      h('td', { class: 'msg' }, h('span', { class: 'lock' }, destroyed ? '✕' : '🔒'),
-        `${destroyed ? 'Key destroyed' : 'Sealed'} · ${c.lines} line${c.lines === 1 ? '' : 's'} · `,
+      h('td', { class: 'msg' }, h('span', { class: 'lock' }, destroyed ? '✕' : locked ? '🔐' : '🔒'),
+        `${destroyed ? 'Key destroyed' : locked ? 'Locked by your key' : 'Sealed'} · ${c.lines} line${c.lines === 1 ? '' : 's'} · `,
         h('span', { class: 'why' }, c.reason || c.status), `  ct=${c.ct_preview || ''}…`));
   }));
 
@@ -356,6 +360,8 @@ function renderDetail() {
         h('h3', { class: 'small muted' }, 'Attributes'), h('pre', {}, JSON.stringify(r.attrs, null, 2))]
       : [h('p', { class: 'small' }, c.status === 'destroyed'
           ? "This chunk's key was destroyed. The ciphertext is still in the bucket, and nobody can read it again."
+          : c.status === 'locked'
+          ? "This chunk's day key is wrapped with the project's own KMS key, and that KMS isn't letting anyone decrypt right now. Nobody, operator included, can read it until the project restores access."
           : `This chunk's text is sealed. keysvc only unwraps its key for members of ${(c.key_id || '').split('/')[0]}, or for operator staff they've given temporary access.`),
         kv([['Status', c.status], ['Reason', c.reason], ['Session', c.session_id], ['Source', SOURCES[c.source] || c.source],
           ['From', c.ts_min && new Date(c.ts_min).toISOString()], ['To', c.ts_max && new Date(c.ts_max).toISOString()],
@@ -499,16 +505,18 @@ function renderAccess() {
     return;
   }
 
-  // project member
+  // project member: admins decide, viewers only see
+  const admin = lv.as === 'member';
+  const onlyAdmins = h('span', { class: 'small muted' }, `Only ${proj} admins can decide.`);
   const rows = [];
   for (const p of pending) rows.push(h('div', { class: 'row' }, h('span', {}, '🙋'),
     h('span', { class: 'grow' }, h('b', {}, p.grantee), ` (operator staff) asks for ${p.minutes} min of access to read ${p.project}'s logs: "${p.reason}"`),
-    h('button', { class: 'btn primary', type: 'button', onclick: () => grantAction(p.id, 'approve', 'member') }, 'Approve'),
-    h('button', { class: 'btn', type: 'button', onclick: () => grantAction(p.id, 'deny', 'member') }, 'Deny')));
+    admin ? h('button', { class: 'btn primary', type: 'button', onclick: () => grantAction(p.id, 'approve', lv.as) }, 'Approve') : onlyAdmins.cloneNode(true),
+    admin ? h('button', { class: 'btn', type: 'button', onclick: () => grantAction(p.id, 'deny', lv.as) }, 'Deny') : null));
   for (const g of active) rows.push(h('div', { class: 'row' }, h('span', {}, '🔓'),
     h('span', { class: 'grow' }, h('b', {}, g.grantee), ` can read ${g.project}'s logs for `,
       h('span', { class: 'left', 'data-expires': g.expires_at }, fmtLeft(new Date(g.expires_at) - Date.now())), ` (approved by ${g.decided_by}).`),
-    h('button', { class: 'btn danger', type: 'button', onclick: () => grantAction(g.id, 'revoke', 'member') }, 'Revoke')));
+    admin ? h('button', { class: 'btn danger', type: 'button', onclick: () => grantAction(g.id, 'revoke', lv.as) }, 'Revoke') : onlyAdmins.cloneNode(true)));
   if (!rows.length) { if (!hist) { el.hidden = true; return; } rows.push(h('div', { class: 'small muted' }, 'No support access requests.')); }
   el.replaceChildren(...rows, hist);
 }
@@ -522,10 +530,95 @@ setInterval(() => {
 }, 1000);
 setInterval(loadGrants, 2000);
 
+// ---------------- security ----------------
+// Roles, the project's key and the access log, all as keysvc reports them for
+// the chosen identity. The customer-KMS buttons act in the customer's own KMS.
+const sec = { as: 'member', staffOnly: false, sig: '' };
+const ACTIONS = {
+  unwrap: 'Decrypt a day key', purge: 'Purge', grant_request: 'Support access requested', grant_approve: 'Support access approved',
+  grant_deny: 'Support access denied', grant_revoke: 'Support access ended', grant_expire: 'Support access expired',
+  byok_enable: 'Switched to own KMS key', customer_key_unavailable: 'Own KMS key: decrypt unavailable', customer_key_restored: 'Own KMS key: decrypt restored',
+};
+
+async function loadSecurity() {
+  if (view !== 'security') return;
+  const [log, key] = await Promise.all([
+    fetch('/api/access-log?as=' + sec.as).then(async (r) => ({ ok: r.ok, body: await r.json() })).catch((e) => ({ ok: false, body: { error: String(e) } })),
+    api('/api/byok?as=' + sec.as).catch(() => ({})),
+  ]);
+  renderKey(key);
+  renderLog(log);
+}
+
+async function byokAction(path, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  const r = await fetch(path + '?as=' + sec.as, { method: 'POST' });
+  const out = await r.json().catch(() => ({}));
+  status(r.ok ? { status: path.endsWith('enable') ? `Now using your own key. ${out.live_keys} existing day key(s) rewrapped.`
+    : path.endsWith('revoke') ? 'In your KMS: decrypt taken away from the operator. keysvc notices within a few seconds.'
+    : 'In your KMS: decrypt given back to the operator.', zone: path.endsWith('revoke') ? 'denied' : 'key' }
+    : { status: out.error || 'failed', zone: 'denied' });
+  setTimeout(loadSecurity, 300);
+}
+
+function renderKey(st) {
+  const el = $('#sec-key');
+  const ks = st.keysvc || {};
+  const head = h('h2', {}, 'Encryption key');
+  if (ks.error) { el.replaceChildren(head, h('p', { class: 'small muted' }, ks.error)); return; }
+  if (ks.mode !== 'customer') {
+    el.replaceChildren(head,
+      h('p', {}, h('span', { class: 'pill op' }, 'Operator-managed'), ' Day keys are wrapped by the operator\'s KMS (', h('span', { class: 'mono' }, ks.wrapper || 'openbao-transit'), '), derived per project.'),
+      h('p', { class: 'small muted' }, 'Switch to your own KMS key and every day key, existing and new, is wrapped with it as well. Take decrypt away in your KMS and nobody, the operator included, can read your logs until you give it back.'),
+      h('div', { class: 'btnrow' }, h('button', { class: 'btn primary', type: 'button', onclick: () => byokAction('/api/byok/enable') }, 'Use my own KMS key'),
+        h('span', { class: 'small muted' }, 'Admins only. Creates a key and a scoped token in your KMS (the customer-kms pod).')));
+    return;
+  }
+  const ok = ks.status === 'ok';
+  el.replaceChildren(...[head,
+    h('p', {}, h('span', { class: 'pill ' + (ok ? 'ok' : 'bad') }, ok ? 'Customer-managed · decrypt available' : 'Customer-managed · locked'), ' ',
+      `${ks.live_keys} live day key(s) are wrapped with `, h('span', { class: 'mono' }, ks.key_name), ' in ', h('span', { class: 'mono' }, ks.kms_addr), ', on top of the operator\'s KMS.'),
+    ok ? null : h('p', { class: 'small', style: 'color: var(--denied)' }, 'keysvc can\'t unwrap with your key: ' + (ks.status_reason || '').slice(0, 160)),
+    h('p', { class: 'small muted' }, `Checked ${ks.checked_at ? new Date(ks.checked_at).toLocaleTimeString() : '—'}. keysvc unwraps a canary every 3 seconds to notice changes you make in your KMS.`),
+    h('div', { class: 'kms-side' },
+      h('div', { class: 'small' }, h('b', {}, 'Your KMS'), ' · what you allow the operator\'s keysvc to do with your key'),
+      h('pre', {}, st.policy || '(no policy)'),
+      h('div', { class: 'btnrow' }, st.decrypt
+        ? h('button', { class: 'btn danger', type: 'button', onclick: () => byokAction('/api/byok/revoke', 'Take decrypt away from the operator in your KMS? Logs keep arriving, but nobody can read any of them until you give it back.') }, 'Revoke operator decrypt')
+        : h('button', { class: 'btn primary', type: 'button', onclick: () => byokAction('/api/byok/restore') }, 'Restore operator decrypt'),
+        h('span', { class: 'small muted' }, 'This happens in your KMS, not through the operator. Encrypt stays allowed, so ingestion keeps working.')))].filter(Boolean));
+}
+
+function renderLog(res) {
+  const chain = $('#sec-chain');
+  if (!res.ok) {
+    chain.className = 'small'; chain.textContent = '';
+    $('#sec-rows').replaceChildren();
+    $('#sec-empty').textContent = res.body.error || 'Not allowed.';
+    return;
+  }
+  const c = res.body.chain || {};
+  chain.className = 'small ' + (c.intact ? 'ok' : 'bad');
+  chain.textContent = c.intact ? `✓ Hash chain intact · ${c.entries} entries · head ${String(c.head || '').slice(0, 16)}…`
+    : `✕ Hash chain broken at entry ${c.broken_at}: an entry was edited or removed`;
+  let es = res.body.entries || [];
+  if (sec.staffOnly) es = es.filter((e) => /^(staff|system)/.test(e.role));
+  $('#sec-empty').textContent = es.length ? '' : 'Nothing yet.';
+  $('#sec-rows').replaceChildren(...es.map((e) => h('tr', { class: /^(staff|system)/.test(e.role) ? 'staff' : '' },
+    h('td', { class: 'time' }, clock(e.ts, true)), h('td', { class: 'mono small' }, e.sub || '—'), h('td', { class: 'small' }, e.role || '—'),
+    h('td', {}, ACTIONS[e.action] || e.action), h('td', { class: e.allowed ? 'allow' : 'deny' }, e.allowed ? 'ALLOW' : 'DENY'),
+    h('td', { class: 'mono small' }, e.key_id), h('td', { class: 'detail small' }, e.reason))));
+}
+
+$('#sec-as').addEventListener('change', (e) => { sec.as = e.target.value; loadSecurity(); });
+$('#sec-staff-only').addEventListener('change', (e) => { sec.staffOnly = e.target.checked; loadSecurity(); });
+setInterval(loadSecurity, 3000);
+
 // ---------------- start ----------------
 preview();
-showView(location.hash === '#logs' ? 'logs' : 'pipeline');
-window.addEventListener('hashchange', () => showView(location.hash === '#logs' ? 'logs' : 'pipeline'));
+const viewFromHash = () => (['#logs', '#security'].includes(location.hash) ? location.hash.slice(1) : 'pipeline');
+showView(viewFromHash());
+window.addEventListener('hashchange', () => showView(viewFromHash()));
 poll().then(inspect);
 setInterval(() => { if (view === 'pipeline') poll(); }, 700);
 setInterval(() => { if (view === 'pipeline') inspect(); }, 2000);

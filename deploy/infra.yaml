@@ -1,6 +1,7 @@
 # Stand-ins for managed infrastructure: ClickHouse, an S3-compatible bucket
-# (SeaweedFS, in place of a cloud object store), a KMS (OpenBao, dev mode) and a
-# Kafka-compatible stream for live tails (Redpanda, one node).
+# (SeaweedFS, in place of a cloud object store), a KMS (OpenBao, dev mode), a
+# Kafka-compatible stream for live tails (Redpanda, one node), and a second
+# OpenBao standing in for the customer's own KMS.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: { name: clickhouse-data }
@@ -129,3 +130,30 @@ metadata: { name: redpanda }
 spec:
   selector: { app: redpanda }
   ports: [{ name: kafka, port: 9092 }]
+---
+# The customer's own KMS, for the customer-managed key (BYOK) demo. In real life
+# this is in the customer's cloud account, not the operator's cluster. Only the
+# demo server, playing the customer, has its root token.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: customer-kms }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: customer-kms } }
+  template:
+    metadata: { labels: { app: customer-kms } }
+    spec:
+      containers:
+        - name: openbao
+          image: openbao/openbao:2.1.0@sha256:7de07aa6df3937d44c96c2d65c188b2d4a70546f2a764ad4510301305af6a223
+          args: ["server", "-dev", "-dev-root-token-id=customer-root", "-dev-listen-address=0.0.0.0:8200"]
+          securityContext: { capabilities: { add: [IPC_LOCK] } }
+          ports: [{ containerPort: 8200 }]
+          readinessProbe: { httpGet: { path: /v1/sys/health, port: 8200 }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: customer-kms }
+spec:
+  selector: { app: customer-kms }
+  ports: [{ port: 8200 }]

@@ -98,7 +98,17 @@ decision, yes or no, goes into an audit table.
 → `unwrap` in [`cmd/keysvc/main.go`](../cmd/keysvc/main.go), checked by
 `TestUnwrapPolicy`
 
-### 5a. Support access is the customer's to give
+### 5a. Admins and viewers
+
+A member's token carries a role in their project. Viewers can read logs, and
+that's all. Admins can also purge, approve or revoke support access, read the
+access log and manage the project's key. A member token with no role is a
+viewer, so a missing claim never grants more. keysvc checks the role on every
+call; the page just shows what it says.
+
+→ `IsMember` and `IsAdmin` in [`internal/auth/auth.go`](../internal/auth/auth.go)
+
+### 5b. Support access is the customer's to give
 
 Sometimes support really does need to read a customer's logs. Giving staff a
 standing decrypt path would turn "we can't read your logs" back into "we have a
@@ -107,12 +117,12 @@ gives:
 
 1. A staff member asks for access to one project, for a reason, for at most an
    hour (`POST /grants`). Nothing changes yet.
-2. A member of that project approves or denies it. Staff can't approve their own
+2. An admin of that project approves or denies it. Staff can't approve their own
    request, and a member of another project can't approve it either.
 3. While the grant is active, keysvc unwraps that project's keys for that staff
    member, and only that project's. The audit row names the grant and who
    approved it.
-4. It ends when the time runs out, or sooner if the member revokes it or the
+4. It ends when the time runs out, or sooner if an admin revokes it or the
    staff member ends it.
 
 Ending a grant has the same caching problem as a purge, and the same answer.
@@ -123,6 +133,53 @@ doesn't hide the new access.
 
 → `requestGrant`, `decideGrant` and `activeGrant` in
 [`cmd/keysvc/main.go`](../cmd/keysvc/main.go), checked by `TestSupportGrant`
+
+### 5c. An access log the customer can check
+
+keysvc records every decision about a project's keys and access: each unwrap,
+allowed or not, every grant request and decision, purges, key changes, and its
+own detections. A project's admins can read all of it, including what operator
+staff did.
+
+It's kept apart from the logs on purpose. The logs are encrypted under the
+project's day keys, so if the access log lived with them, purging a day, or
+the customer locking their key, would also erase who read that day. It holds no
+log text, only who, when, which key and why. Keeping it longer than the logs is
+fine.
+
+Each project's entries form a hash chain: every entry's hash covers its own
+fields and the previous entry's hash. Change or delete one and every hash after
+it stops matching, and `/access-log` reports where. That doesn't stop someone
+with database access from rewriting the whole chain. Anchoring the latest hash
+somewhere they can't reach (a write-once bucket, or a signed copy sent to the
+customer) is what closes that.
+
+→ `audit` and `accessLog` in [`cmd/keysvc/main.go`](../cmd/keysvc/main.go),
+checked by `TestAccessLog`
+
+### 5d. The customer can hold a key too
+
+With a customer-managed key (BYOK), every day key is wrapped twice: by the
+operator's KMS on the inside, and by a key in the customer's own KMS on the
+outside. Switching it on rewraps every live day key the project already has.
+
+keysvc reaches the customer's key through a token the customer issued, with a
+policy the customer controls. Taking `decrypt` out of that policy locks the
+project: nobody, the operator included, can unwrap a day key until it's put
+back. `encrypt` stays, so producers keep getting new day keys and logs keep
+arriving. They just can't be read.
+
+The customer doesn't tell keysvc when they change the policy. keysvc finds out
+by unwrapping a small canary every 3 seconds. When the answer changes, it logs
+it and publishes the project on `/revocations`, so the aggregator drops every
+key it cached for the project and open tails reload. Readers see the project's
+chunks as **locked** rather than sealed.
+
+The cost is a dependency: if the customer's KMS is slow or down, so are reads,
+and new day keys can't be issued.
+
+→ `wrapKey`, `unwrapKey`, `enableBYOK` and `checkCustomerKeys` in
+[`cmd/keysvc/main.go`](../cmd/keysvc/main.go), checked by `TestBYOK`
 
 ### 6. Decrypt at query time, as the person asking
 
@@ -229,7 +286,8 @@ node's disk for the test card number
 | Someone who edits the metadata index | No | The aggregator decrypts using the metadata stored inside the object, which is authenticated | They can hide chunks from queries |
 | Someone reading the node's disk | No | The agent's output goes through in-memory pipes, never the runtime's log files | Nothing |
 | A compromised aggregator | **Yes**, for anyone who queries while it's compromised | It decrypts in memory on the caller's behalf | Up to 5 minutes of cached keys per caller |
-| A compromised keysvc **and** KMS access | **Yes** | Together they can unwrap any key | Everything that hasn't been purged |
+| A compromised keysvc **and** KMS access | **Yes**, except projects that hold their own key and have locked it | Together they can unwrap any key the operator controls | Everything that hasn't been purged or locked |
+| A project viewer | Yes, their project's logs | They're a member | They can't purge, approve support access, or read the access log |
 | A compromised producer | **Yes**, for its own pod's output | It sees the text before encrypting it | Nothing from other pods or other days |
 | Anyone, after a purge | No | The key is gone, so the ciphertext can't be opened | Ciphertext |
 
@@ -282,6 +340,10 @@ The demo takes some shortcuts on purpose:
   producers separately.
 - **Open debug endpoints.** `/keys` and `/audit` answer any valid token so the
   demo can show them, and `/revocations` answers anyone. Those need locking down.
+- **The customer's key.** BYOK here is a second OpenBao in the same cluster,
+  reached with a long-lived token. A real version uses the customer's cloud KMS
+  through a cross-account role, and anchors the access log's chain head outside
+  the operator's reach.
 - **Who asks for access.** Any staff token can request a grant. A real version
   ties requests to a support ticket and to staff SSO, notifies the customer, and
   probably needs a second approver on the operator side too.

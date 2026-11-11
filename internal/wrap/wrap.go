@@ -25,14 +25,31 @@ type KeyWrapper interface {
 // so each project effectively has its own master key.
 type Transit struct {
 	Addr, Token, KeyName string
+	Derived              bool
+	name                 string
 	c                    *http.Client
 }
 
 func NewTransit(addr, token string) *Transit {
-	return &Transit{Addr: addr, Token: token, KeyName: "sealed-logs-master", c: &http.Client{Timeout: 5 * time.Second}}
+	return &Transit{Addr: addr, Token: token, KeyName: "sealed-logs-master", Derived: true, name: "openbao-transit",
+		c: &http.Client{Timeout: 5 * time.Second}}
 }
 
-func (t *Transit) Name() string { return "openbao-transit" }
+// NewCustomerKey wraps with a key in the customer's own KMS, through a token the
+// customer issued. The customer can take decrypt away from that token at any
+// time; from then on nothing wrapped with the key can be unwrapped.
+func NewCustomerKey(addr, token, keyName string) *Transit {
+	return &Transit{Addr: addr, Token: token, KeyName: keyName, name: "customer-kms", c: &http.Client{Timeout: 3 * time.Second}}
+}
+
+func (t *Transit) Name() string { return t.name }
+
+func (t *Transit) context(project string) map[string]any {
+	if !t.Derived {
+		return map[string]any{}
+	}
+	return map[string]any{"context": base64.StdEncoding.EncodeToString([]byte(project))}
+}
 
 func (t *Transit) Init(ctx context.Context) error {
 	err := t.do(ctx, "/v1/sys/mounts/transit", map[string]any{"type": "transit"}, nil)
@@ -52,10 +69,9 @@ func (t *Transit) Wrap(ctx context.Context, project string, key []byte) (string,
 			Ciphertext string `json:"ciphertext"`
 		} `json:"data"`
 	}
-	err := t.do(ctx, "/v1/transit/encrypt/"+t.KeyName, map[string]any{
-		"plaintext": base64.StdEncoding.EncodeToString(key),
-		"context":   base64.StdEncoding.EncodeToString([]byte(project)),
-	}, &out)
+	body := t.context(project)
+	body["plaintext"] = base64.StdEncoding.EncodeToString(key)
+	err := t.do(ctx, "/v1/transit/encrypt/"+t.KeyName, body, &out)
 	return out.Data.Ciphertext, err
 }
 
@@ -65,10 +81,9 @@ func (t *Transit) Unwrap(ctx context.Context, project, blob string) ([]byte, err
 			Plaintext string `json:"plaintext"`
 		} `json:"data"`
 	}
-	err := t.do(ctx, "/v1/transit/decrypt/"+t.KeyName, map[string]any{
-		"ciphertext": blob,
-		"context":    base64.StdEncoding.EncodeToString([]byte(project)),
-	}, &out)
+	body := t.context(project)
+	body["ciphertext"] = blob
+	err := t.do(ctx, "/v1/transit/decrypt/"+t.KeyName, body, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +105,12 @@ func (t *Transit) do(ctx context.Context, path string, body, out any) error {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("openbao %s: %d %s", path, resp.StatusCode, strings.TrimSpace(string(rb)))
+		msg := strings.TrimSpace(string(rb))
+		var e struct{ Errors []string }
+		if json.Unmarshal(rb, &e) == nil && len(e.Errors) > 0 {
+			msg = strings.Join(strings.Fields(strings.Join(e.Errors, "; ")), " ")
+		}
+		return fmt.Errorf("%s %s: %d %s", t.name, path, resp.StatusCode, msg)
 	}
 	if out != nil && len(rb) > 0 {
 		return json.Unmarshal(rb, out)

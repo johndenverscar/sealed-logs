@@ -12,6 +12,7 @@
   <nav class="views" role="tablist">
     <button role="tab" data-view="pipeline" aria-selected="true">Pipeline</button>
     <button role="tab" data-view="logs" aria-selected="false">Logs</button>
+    <button role="tab" data-view="security" aria-selected="false">Security</button>
   </nav>
   <div class="ctx muted" id="ctx"></div>
 </header>
@@ -88,7 +89,8 @@
     <div class="lv-controls">
       <label class="small muted">Viewing as
         <select id="lv-as">
-          <option value="member">u_alice · project member</option>
+          <option value="member">u_alice · project admin</option>
+          <option value="viewer">u_carol · project viewer</option>
           <option value="staff">s_bob · operator staff</option>
           <option value="other">u_mallory · other project</option>
         </select>
@@ -123,6 +125,56 @@
     </section>
     <aside class="lv-detail" id="lv-detail" hidden></aside>
   </div>
+</main>
+
+<!-- ============ Security: roles, the project's key, the access log ============ -->
+<main id="view-security" class="view" hidden>
+  <div class="lv-head">
+    <h1>Security <span class="chip mono" id="sec-proj"></span></h1>
+    <div class="lv-controls">
+      <label class="small muted">Viewing as
+        <select id="sec-as">
+          <option value="member">u_alice · project admin</option>
+          <option value="viewer">u_carol · project viewer</option>
+          <option value="staff">s_bob · operator staff</option>
+          <option value="other">u_mallory · other project</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="sec-grid">
+    <section class="card">
+      <h2>Members</h2>
+      <table class="sec-table small">
+        <thead><tr><th>Who</th><th>Role</th><th>Read logs</th><th>Purge</th><th>Approve support</th><th>Access log</th><th>Manage keys</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">u_alice</td><td>admin</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+          <tr><td class="mono">u_carol</td><td>viewer</td><td>✓</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+          <tr><td class="mono">s_bob</td><td>operator staff</td><td>only with a grant</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+        </tbody>
+      </table>
+      <p class="small muted">keysvc enforces these from the role in each person's token. Try the buttons below as u_carol.</p>
+    </section>
+
+    <section class="card" id="sec-key"></section>
+  </div>
+
+  <section class="card">
+    <div class="inspect-head">
+      <h2>Access log</h2>
+      <label class="small toggle"><input type="checkbox" id="sec-staff-only"> Operator staff and system only</label>
+    </div>
+    <div id="sec-chain" class="small"></div>
+    <div class="lv-table-wrap">
+      <table class="lv-table sec-log">
+        <thead><tr><th>Time</th><th>Who</th><th>Role</th><th>Action</th><th>Result</th><th>Key or grant</th><th>Detail</th></tr></thead>
+        <tbody id="sec-rows"></tbody>
+      </table>
+      <div class="lv-empty muted" id="sec-empty"></div>
+    </div>
+    <p class="small muted">Kept by keysvc, apart from the logs: purging a day or locking your key never erases who read it. Each entry's hash covers the one before it, so an edited or deleted entry breaks the chain.</p>
+  </section>
 </main>
 
 <div class="status" id="status" role="status"></div>

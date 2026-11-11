@@ -35,6 +35,9 @@ spec:
           env:
             - { name: DEMO_ADDR, value: ":7100" }
             - { name: KUBE_CONTEXT, value: in-cluster }
+            # The demo plays the customer, so it holds the customer KMS's root token.
+            - { name: CUSTOMER_KMS_ADDR, value: "http://customer-kms:8200" }
+            - { name: CUSTOMER_KMS_TOKEN, value: customer-root }
           ports: [{ containerPort: 7100 }]
           readinessProbe: { httpGet: { path: /, port: 7100 }, periodSeconds: 2 }
 ---

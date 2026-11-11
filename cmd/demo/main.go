@@ -53,6 +53,11 @@ func (d *Demo) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/grants", grants)
 	mux.HandleFunc("POST /api/grants", requestGrant)
 	mux.HandleFunc("POST /api/grants/{id}/{action}", decideGrant)
+	mux.HandleFunc("GET /api/access-log", accessLog)
+	mux.HandleFunc("GET /api/byok", byokState)
+	mux.HandleFunc("POST /api/byok/enable", enableBYOK)
+	mux.HandleFunc("POST /api/byok/revoke", customerDecrypt(false))
+	mux.HandleFunc("POST /api/byok/restore", customerDecrypt(true))
 	return mux
 }
 

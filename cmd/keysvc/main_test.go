@@ -18,6 +18,7 @@ import (
 
 	"sealedlogs/internal/auth"
 	"sealedlogs/internal/envelope"
+	"sealedlogs/internal/wrap"
 )
 
 // fakeWrapper stands in for OpenBao. Like Transit with a derived key, a blob
@@ -125,7 +126,8 @@ func TestUnwrapPolicy(t *testing.T) {
 		tok  string
 		want int
 	}{
-		{"project member", auth.Mint("u_alice", "p_demo", auth.RoleMember, time.Hour), 200},
+		{"project admin", auth.MintMember("u_alice", "p_demo", auth.ProjectAdmin, time.Hour), 200},
+		{"project viewer", auth.MintMember("u_carol", "p_demo", auth.ProjectViewer, time.Hour), 200},
 		{"staff", auth.Mint("s_bob", "", auth.RoleStaff, time.Hour), 403},
 		{"staff claiming the project", auth.Mint("s_bob", "p_demo", auth.RoleStaff, time.Hour), 403},
 		{"other project's member", auth.Mint("u_mallory", "p_other", auth.RoleMember, time.Hour), 403},
@@ -153,7 +155,7 @@ func TestUnwrapPolicy(t *testing.T) {
 
 	var allowed, denied int
 	_ = s.db.QueryRow(`SELECT SUM(allowed), SUM(1-allowed) FROM audit WHERE action='unwrap'`).Scan(&allowed, &denied)
-	if allowed != 1 || denied != len(cases)-1 {
+	if allowed != 2 || denied != len(cases)-2 {
 		t.Errorf("audit rows: %d allowed, %d denied", allowed, denied)
 	}
 }
@@ -163,11 +165,15 @@ func TestUnwrapPolicy(t *testing.T) {
 func TestPurge(t *testing.T) {
 	s, ts := newTest(t)
 	keyID, _ := issue(t, s, ts)
-	member := auth.Mint("u_alice", "p_demo", auth.RoleMember, time.Hour)
+	member := auth.MintMember("u_alice", "p_demo", auth.ProjectAdmin, time.Hour)
 
-	if code, _ := call(t, ts, "POST", "/purge", auth.Mint("u_mallory", "p_other", auth.RoleMember, time.Hour),
-		map[string]string{"Project": "p_demo", "From": today(), "To": today()}); code != 403 {
-		t.Fatalf("another project purged p_demo: %d", code)
+	for name, tok := range map[string]string{
+		"another project's admin": auth.MintMember("u_mallory", "p_other", auth.ProjectAdmin, time.Hour),
+		"a viewer":                auth.MintMember("u_carol", "p_demo", auth.ProjectViewer, time.Hour),
+	} {
+		if code, _ := call(t, ts, "POST", "/purge", tok, map[string]string{"Project": "p_demo", "From": today(), "To": today()}); code != 403 {
+			t.Fatalf("%s purged p_demo: %d", name, code)
+		}
 	}
 	code, out := call(t, ts, "POST", "/purge", member, map[string]string{"Project": "p_demo", "From": today(), "To": today()})
 	if code != 200 || len(out["destroyed"].([]any)) != 1 {
@@ -222,8 +228,9 @@ func TestSupportGrant(t *testing.T) {
 	keyID, _ := issue(t, s, ts)
 	staff := auth.Mint("s_bob", "", auth.RoleStaff, time.Hour)
 	otherStaff := auth.Mint("s_eve", "", auth.RoleStaff, time.Hour)
-	member := auth.Mint("u_alice", "p_demo", auth.RoleMember, time.Hour)
-	outsider := auth.Mint("u_mallory", "p_other", auth.RoleMember, time.Hour)
+	member := auth.MintMember("u_alice", "p_demo", auth.ProjectAdmin, time.Hour)
+	viewer := auth.MintMember("u_carol", "p_demo", auth.ProjectViewer, time.Hour)
+	outsider := auth.MintMember("u_mallory", "p_other", auth.ProjectAdmin, time.Hour)
 	unwrap := func(tok string) (int, map[string]any) {
 		return call(t, ts, "POST", "/unwrap", tok, map[string]string{"key_id": keyID})
 	}
@@ -242,7 +249,7 @@ func TestSupportGrant(t *testing.T) {
 	if code, _ := unwrap(staff); code != 403 {
 		t.Errorf("pending grant let staff decrypt: %d", code)
 	}
-	for name, tok := range map[string]string{"the staff member": staff, "another project's member": outsider, "other staff": otherStaff} {
+	for name, tok := range map[string]string{"the staff member": staff, "another project's admin": outsider, "other staff": otherStaff, "a viewer": viewer} {
 		if code, _ := call(t, ts, "POST", "/grants/"+id+"/approve", tok, nil); code != 403 {
 			t.Errorf("%s approved the grant: %d", name, code)
 		}
@@ -293,5 +300,117 @@ func TestSupportGrant(t *testing.T) {
 	_ = s.db.QueryRow(`SELECT status FROM grants WHERE id=?`, id).Scan(&status)
 	if status != "expired" {
 		t.Errorf("grant status after expiry: %s", status)
+	}
+}
+
+// The access log is the project's view of the audit. It is hash-chained, so
+// editing or deleting a row is visible to whoever checks the chain.
+func TestAccessLog(t *testing.T) {
+	s, ts := newTest(t)
+	keyID, _ := issue(t, s, ts)
+	admin := auth.MintMember("u_alice", "p_demo", auth.ProjectAdmin, time.Hour)
+	call(t, ts, "POST", "/unwrap", admin, map[string]string{"key_id": keyID})
+	call(t, ts, "POST", "/unwrap", auth.Mint("s_bob", "", auth.RoleStaff, time.Hour), map[string]string{"key_id": keyID})
+	call(t, ts, "POST", "/grants", auth.Mint("s_bob", "", auth.RoleStaff, time.Hour), map[string]any{"project": "p_demo", "reason": "x", "minutes": 5})
+	call(t, ts, "POST", "/unwrap", auth.MintMember("u_mallory", "p_other", auth.ProjectAdmin, time.Hour), map[string]string{"key_id": keyID})
+
+	for name, tok := range map[string]string{
+		"a viewer":                auth.MintMember("u_carol", "p_demo", auth.ProjectViewer, time.Hour),
+		"staff":                   auth.Mint("s_bob", "", auth.RoleStaff, time.Hour),
+		"another project's admin": auth.MintMember("u_mallory", "p_other", auth.ProjectAdmin, time.Hour),
+	} {
+		if code, _ := call(t, ts, "GET", "/access-log?project=p_demo", tok, nil); code != 403 {
+			t.Errorf("%s read p_demo's access log: %d", name, code)
+		}
+	}
+	code, out := call(t, ts, "GET", "/access-log?project=p_demo", admin, nil)
+	chain, _ := out["chain"].(map[string]any)
+	if code != 200 || chain["intact"] != true || chain["entries"].(float64) != 4 {
+		t.Fatalf("access log: %d %v", code, out)
+	}
+
+	// Quietly soften one row, the way someone covering their tracks would.
+	_, _ = s.db.Exec(`UPDATE audit SET reason='project member' WHERE sub='s_bob' AND action='unwrap'`)
+	_, out = call(t, ts, "GET", "/access-log?project=p_demo", admin, nil)
+	chain, _ = out["chain"].(map[string]any)
+	if chain["intact"] != false {
+		t.Errorf("an edited row went unnoticed: %v", chain)
+	}
+}
+
+// fakeCustomerKMS stands in for the customer's own KMS. Revoking takes decrypt
+// away from the operator but leaves encrypt, the way a customer would restrict
+// a KMS grant.
+type fakeCustomerKMS struct{ revoked bool }
+
+func (f *fakeCustomerKMS) wrapper(_, _, key string) wrap.KeyWrapper { return customerWrapper{f, key} }
+
+type customerWrapper struct {
+	f   *fakeCustomerKMS
+	key string
+}
+
+func (customerWrapper) Name() string { return "fake-customer" }
+func (w customerWrapper) Wrap(_ context.Context, _ string, b []byte) (string, error) {
+	return w.key + ":" + base64.StdEncoding.EncodeToString(b), nil
+}
+func (w customerWrapper) Unwrap(_ context.Context, _ string, blob string) ([]byte, error) {
+	if w.f.revoked {
+		return nil, errors.New("permission denied")
+	}
+	k, b, ok := strings.Cut(blob, ":")
+	if !ok || k != w.key {
+		return nil, errors.New("not wrapped with this key")
+	}
+	return base64.StdEncoding.DecodeString(b)
+}
+
+// With BYOK, every day key, existing and new, is also wrapped with the
+// customer's key. When the customer revokes, nobody can unwrap, logs still come
+// in, and decrypters are told to drop what they cached.
+func TestBYOK(t *testing.T) {
+	s, ts := newTest(t)
+	kms := &fakeCustomerKMS{}
+	s.customerKey = kms.wrapper
+	before, _ := issue(t, s, ts)
+	admin := auth.MintMember("u_alice", "p_demo", auth.ProjectAdmin, time.Hour)
+	cfg := map[string]string{"kms_addr": "kms.customer.example", "key_name": "p_demo-logs", "token": "t"}
+
+	if code, _ := call(t, ts, "PUT", "/projects/p_demo/byok", auth.MintMember("u_carol", "p_demo", auth.ProjectViewer, time.Hour), cfg); code != 403 {
+		t.Fatalf("a viewer changed the project's keys: %d", code)
+	}
+	code, out := call(t, ts, "PUT", "/projects/p_demo/byok", admin, cfg)
+	if code != 200 || out["live_keys"].(float64) != 1 {
+		t.Fatalf("enable: %d %v", code, out)
+	}
+	var by string
+	_ = s.db.QueryRow(`SELECT wrapped_by FROM keys WHERE key_id=?`, before).Scan(&by)
+	if by != "customer:p_demo-logs" {
+		t.Errorf("existing key not rewrapped: %q", by)
+	}
+	if code, _ := call(t, ts, "POST", "/unwrap", admin, map[string]string{"key_id": before}); code != 200 {
+		t.Fatalf("unwrap through the customer's key: %d", code)
+	}
+
+	kms.revoked = true
+	if code, _ := call(t, ts, "POST", "/unwrap", admin, map[string]string{"key_id": before}); code != 423 {
+		t.Errorf("unwrap after the customer revoked: %d, want 423", code)
+	}
+	// New keys can still be issued: the customer took decrypt away, not encrypt.
+	s.db.Exec(`UPDATE keys SET destroyed_at=? WHERE key_id=?`, now(), before)
+	if code, out := call(t, ts, "GET", "/pubkey?project=p_demo", auth.Mint("w", "p_demo", auth.RoleProducer, time.Hour), nil); code != 200 {
+		t.Errorf("producers locked out while decrypt is revoked: %d %v", code, out)
+	}
+	s.checkCustomerKeys(context.Background())
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM revocations WHERE project='p_demo'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("revocation not published when the key went away: %d", n)
+	}
+	kms.revoked = false
+	s.checkCustomerKeys(context.Background())
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM revocations WHERE project='p_demo'`).Scan(&n)
+	if n != 2 {
+		t.Errorf("revocation not published when the key came back: %d", n)
 	}
 }

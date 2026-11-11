@@ -410,8 +410,9 @@ func (s *server) tail(w http.ResponseWriter, r *http.Request) {
 }
 
 type notice struct {
-	KeyID string `json:"key_id,omitempty"`
-	Sub   string `json:"sub,omitempty"`
+	KeyID   string `json:"key_id,omitempty"`
+	Sub     string `json:"sub,omitempty"`
+	Project string `json:"project,omitempty"` // the project's own key became unavailable, or came back
 }
 
 func (s *server) subscribe() chan notice {
@@ -428,9 +429,10 @@ func (s *server) unsubscribe(ch chan notice) {
 	s.mu.Unlock()
 }
 
-// followRevocations evicts cached keys as soon as keysvc destroys them, and every
-// decision cached for a person whose access grant started or ended. Open tails
-// are told too.
+// followRevocations evicts cached keys as soon as keysvc destroys them, every
+// decision cached for a person whose access grant started or ended, and every
+// key of a project whose own KMS key went away or came back. Open tails are
+// told too.
 func (s *server) followRevocations() {
 	after := 0
 	for ; ; time.Sleep(revocationPoll) {
@@ -439,9 +441,10 @@ func (s *server) followRevocations() {
 			continue
 		}
 		var revs []struct {
-			Seq   int    `json:"seq"`
-			KeyID string `json:"key_id"`
-			Sub   string `json:"sub"`
+			Seq     int    `json:"seq"`
+			KeyID   string `json:"key_id"`
+			Sub     string `json:"sub"`
+			Project string `json:"project"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&revs)
 		resp.Body.Close()
@@ -449,22 +452,26 @@ func (s *server) followRevocations() {
 			after = r.Seq
 			s.mu.Lock()
 			for k, v := range s.cache {
-				if (r.KeyID != "" && strings.HasSuffix(k, "|"+r.KeyID)) || (r.Sub != "" && strings.HasPrefix(k, r.Sub+"|")) {
+				if (r.KeyID != "" && strings.HasSuffix(k, "|"+r.KeyID)) || (r.Sub != "" && strings.HasPrefix(k, r.Sub+"|")) ||
+					(r.Project != "" && strings.Contains(k, "|"+r.Project+"/")) {
 					clear(v.priv)
 					delete(s.cache, k)
 				}
 			}
 			for ch := range s.tails {
 				select {
-				case ch <- notice{KeyID: r.KeyID, Sub: r.Sub}:
+				case ch <- notice{KeyID: r.KeyID, Sub: r.Sub, Project: r.Project}:
 				default:
 				}
 			}
 			s.mu.Unlock()
-			if r.KeyID != "" {
+			switch {
+			case r.KeyID != "":
 				events.Emit("aggregator", "key_evicted", map[string]any{"key_id": r.KeyID})
-			} else {
+			case r.Sub != "":
 				events.Emit("aggregator", "access_evicted", map[string]any{"sub": r.Sub})
+			default:
+				events.Emit("aggregator", "project_evicted", map[string]any{"project": r.Project})
 			}
 		}
 	}
@@ -521,6 +528,8 @@ func (s *server) key(ctx context.Context, c *auth.Claims, tok, keyID string) cac
 		v.status, v.reason = "denied", out.Error
 	case 410:
 		v.status, v.reason = "destroyed", out.Error
+	case 423:
+		v.status, v.reason = "locked", out.Error
 	default:
 		return cached{status: "error", reason: fmt.Sprintf("keysvc %d %s", resp.StatusCode, out.Error)}
 	}

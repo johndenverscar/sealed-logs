@@ -407,7 +407,8 @@ func (d *Demo) Derive(t *Trace) Derived {
 
 // ---- actions ----
 
-var viewers = map[string]string{"member": "u_alice (project member)", "staff": "s_bob@example.com (operator staff)", "other": "u_mallory (member of p_other)"}
+var viewers = map[string]string{"member": "u_alice (project admin)", "viewer": "u_carol (project viewer)",
+	"staff": "s_bob@example.com (operator staff)", "other": "u_mallory (admin of p_other)"}
 
 // ReadAs queries the aggregator for the trace's session as one of the demo
 // identities and reports what that person got back for the traced line.
