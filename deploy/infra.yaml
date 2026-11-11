@@ -1,5 +1,6 @@
 # Stand-ins for managed infrastructure: ClickHouse, an S3-compatible bucket
-# (SeaweedFS, in place of a cloud object store) and a KMS (OpenBao, dev mode).
+# (SeaweedFS, in place of a cloud object store), a KMS (OpenBao, dev mode) and a
+# Kafka-compatible stream for live tails (Redpanda, one node).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: { name: clickhouse-data }
@@ -102,3 +103,29 @@ metadata: { name: openbao }
 spec:
   selector: { app: openbao }
   ports: [{ port: 8200 }]
+---
+# The live-tail stream. It carries the same sealed chunks as the bucket, so it
+# holds no plaintext. One node, in memory-light dev mode.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: redpanda }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redpanda } }
+  template:
+    metadata: { labels: { app: redpanda } }
+    spec:
+      containers:
+        - name: redpanda
+          image: redpandadata/redpanda:v26.2.5@sha256:badca2d958f81da675c3055a9ecb6ebb590325582bcf16936148ffd65e96e920
+          args: [redpanda, start, --mode, dev-container, --smp, "1", --memory, 512M,
+                 --kafka-addr, "internal://0.0.0.0:9092", --advertise-kafka-addr, "internal://redpanda:9092"]
+          ports: [{ containerPort: 9092 }, { containerPort: 9644 }]
+          readinessProbe: { httpGet: { path: /v1/status/ready, port: 9644 }, periodSeconds: 2 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redpanda }
+spec:
+  selector: { app: redpanda }
+  ports: [{ name: kafka, port: 9092 }]

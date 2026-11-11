@@ -90,12 +90,39 @@ response, the producer refuses the key instead of encrypting to an attacker.
 
 There's exactly one way to turn a wrapped key back into a usable private key:
 keysvc's `/unwrap`. It hands the key over only if the caller's token has the
-`member` role and its project matches the key's project. Staff, producers and
-members of other projects are all refused. Every decision, yes or no, goes into
-an audit table.
+`member` role and its project matches the key's project, or if the caller is
+staff holding an access grant for that project (next section). Producers,
+members of other projects and staff without a grant are all refused. Every
+decision, yes or no, goes into an audit table.
 
 → `unwrap` in [`cmd/keysvc/main.go`](../cmd/keysvc/main.go), checked by
 `TestUnwrapPolicy`
+
+### 5a. Support access is the customer's to give
+
+Sometimes support really does need to read a customer's logs. Giving staff a
+standing decrypt path would turn "we can't read your logs" back into "we have a
+policy against reading your logs", so instead access is a grant the customer
+gives:
+
+1. A staff member asks for access to one project, for a reason, for at most an
+   hour (`POST /grants`). Nothing changes yet.
+2. A member of that project approves or denies it. Staff can't approve their own
+   request, and a member of another project can't approve it either.
+3. While the grant is active, keysvc unwraps that project's keys for that staff
+   member, and only that project's. The audit row names the grant and who
+   approved it.
+4. It ends when the time runs out, or sooner if the member revokes it or the
+   staff member ends it.
+
+Ending a grant has the same caching problem as a purge, and the same answer.
+keysvc publishes the person on `/revocations`, the aggregator drops every
+decision it cached for them, and it never caches a key past the grant's end
+anyway. Approving a grant publishes too, so a denial cached a minute earlier
+doesn't hide the new access.
+
+→ `requestGrant`, `decideGrant` and `activeGrant` in
+[`cmd/keysvc/main.go`](../cmd/keysvc/main.go), checked by `TestSupportGrant`
 
 ### 6. Decrypt at query time, as the person asking
 
@@ -116,6 +143,32 @@ searching for `4111` also finds `4-1-1-1` or `4🙂1🙂1🙂1`: no index ever s
 text, so the search is free to be flexible.
 
 → [`cmd/aggregator/main.go`](../cmd/aggregator/main.go)
+
+### 6a. Live tail, from the same sealed chunks
+
+After the collector stores and indexes a chunk, it publishes the same sealed
+chunk to a Kafka topic (Redpanda here). The stream holds exactly what the bucket
+does, so it's no more sensitive than the bucket.
+
+A tail is a server-sent event stream from the aggregator's `/tail`. The
+aggregator reads chunks off the topic and opens each one exactly the way a query
+would: keysvc unwraps with the caller's own token, so a member watching sees
+lines, and staff without a grant see sealed rows going by. Two details:
+
+- **No gap at the start.** The page loads with a normal query, then opens the
+  tail with the time of that query. The aggregator notes the topic's end offset
+  first, then backfills from the index anything stored since the query, then
+  reads from that offset. Every chunk is stored and indexed before it's
+  published, so anything published before the offset is in the backfill.
+  Duplicates are dropped by chunk ID.
+- **Revocations reach open tails.** When a key is destroyed or someone's access
+  changes, every open tail gets an event and the page reloads what it shows.
+
+The sidecar flushes every 500 ms in this demo, so a tail runs about a second
+behind the agent.
+
+→ `publish` in [`cmd/collector/main.go`](../cmd/collector/main.go), `tail` in
+[`cmd/aggregator/main.go`](../cmd/aggregator/main.go)
 
 ### 7. Delete the key, not the data
 
@@ -168,9 +221,11 @@ node's disk for the test card number
 | Who | Can they read the logs? | Why | What they still get |
 |---|---|---|---|
 | Someone who steals the bucket and ClickHouse | No | Only ciphertext and metadata are stored | Project and session IDs, timestamps, line counts, level counts, chunk sizes |
-| Operator staff using the product | No | keysvc refuses `staff`, and every attempt is audited | The metadata index |
+| Operator staff using the product | No, unless the project grants it | keysvc refuses `staff` without an active grant for that project, and every attempt is audited | The metadata index |
+| Operator staff with an approved grant | **Yes**, that project only, until the grant ends | A member of the project approved it | Nothing after it ends or is revoked |
 | Another customer | No | keysvc checks the token's project against the key's project | Nothing |
 | A compromised collector | No | It never holds a key | It can drop chunks. Anything it edits fails to decrypt |
+| Someone reading the stream | No | It carries the same sealed chunks as the bucket | The same metadata as the index |
 | Someone who edits the metadata index | No | The aggregator decrypts using the metadata stored inside the object, which is authenticated | They can hide chunks from queries |
 | Someone reading the node's disk | No | The agent's output goes through in-memory pipes, never the runtime's log files | Nothing |
 | A compromised aggregator | **Yes**, for anyone who queries while it's compromised | It decrypts in memory on the caller's behalf | Up to 5 minutes of cached keys per caller |
@@ -227,6 +282,12 @@ The demo takes some shortcuts on purpose:
   producers separately.
 - **Open debug endpoints.** `/keys` and `/audit` answer any valid token so the
   demo can show them, and `/revocations` answers anyone. Those need locking down.
+- **Who asks for access.** Any staff token can request a grant. A real version
+  ties requests to a support ticket and to staff SSO, notifies the customer, and
+  probably needs a second approver on the operator side too.
+- **The stream.** Redpanda runs as one node with no auth or TLS, and every tail
+  reads the whole topic and drops other projects' chunks. A real version would
+  partition by project and authenticate the consumers.
 - **keysvc's storage.** It's one replica on SQLite. A real version wants a
   replicated database, several replicas and an append-only store for the audit
   log.

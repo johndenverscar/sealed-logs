@@ -1,6 +1,6 @@
 # Demo
 
-This takes about 20 minutes. You're going to play a customer whose code logs a
+This takes about 25 minutes. You're going to play a customer whose code logs a
 card number by accident, and then go looking for it. By the end you'll have seen
 that:
 
@@ -9,7 +9,9 @@ that:
 - your project can read it, but operator staff and other customers can't;
 - a client that tries to send plaintext gets turned away;
 - once you purge the day, nobody can read it again, and new logs carry on as
-  normal under a new key.
+  normal under a new key;
+- a live tail shows each person exactly what a query would;
+- support can read your logs only while you let them.
 
 [design.md](design.md) has the longer explanation of each piece if you want it.
 
@@ -181,6 +183,47 @@ any backup of it, and none of it can be read again. The aggregator had a copy of
 the key cached, but it watches keysvc's list of destroyed keys and dropped it
 within 2 seconds. New logs get a fresh key, so they aren't affected.
 
+## 10. Tail it live
+
+Open the **Logs** tab in two browser windows side by side. Set one to
+`u_alice · project member` and the other to `s_bob · operator staff`, and tick
+**Live tail** in both. A green **● Live** shows up next to it.
+
+Now send a few lines from **Pipeline** (a third window, or switch back and
+forth). Within about a second each line shows up at the top of Alice's table,
+highlighted. In Bob's window a **Sealed** row arrives at the same moment: he can
+see that something was logged, and when, but not what.
+
+Click **stream** on the Pipeline tab to see where the tail got it from. The
+collector published the same sealed chunk it stored, and the aggregator read it
+off the topic and asked keysvc to unwrap with each viewer's own token, just like
+a query. **aggregator** shows "opened the chunk for a live tail" for each of
+them.
+
+## 11. Give support temporary access
+
+Stay on **Logs** as `s_bob · operator staff`. Above the chart there's a panel
+saying you can see when and where the project logged, but not what. Pick
+**2 min**, keep the reason, and click **Request access**. Nothing changes yet:
+the panel says it's waiting for a member of `p_demo`.
+
+Switch **Viewing as** to `u_alice · project member` (or use the other window).
+Alice sees Bob's request, with his reason. Click **Approve**.
+
+Switch back to Bob. The panel turns orange with a countdown, and the rows that
+were **Sealed** are now readable, live tail included. Click **keysvc** on the
+Pipeline tab: Bob's unwraps are allowed, and each audit row names the grant and
+that Alice approved it.
+
+Then either wait out the two minutes or have Alice click **Revoke**. Within a
+couple of seconds Bob's view reloads and everything is sealed again. The
+aggregator dropped what it had cached for him, and keysvc refuses him until
+someone approves a new grant.
+
+Bob can't approve his own request, and a member of another project can't
+approve it for p_demo. A grant only ever covers the one project that approved
+it.
+
 ## What you saw
 
 | What you saw | Where | The test that checks it |
@@ -191,6 +234,8 @@ within 2 seconds. New logs get a fresh key, so they aren't affected.
 | Only members of the key's project can decrypt, and every decision is audited | Steps 4–5 | `TestUnwrapPolicy`, `TestLifecycle`, `TestLogsView` |
 | Plaintext is refused at the door | Step 8 | `TestValidate`, `TestLifecycle` |
 | Destroying a key deletes its logs everywhere, within about 2 seconds | Step 9 | `TestPurge` (keysvc and live) |
+| A live tail decrypts for whoever is watching, and nobody else | Step 10 | Not automated |
+| Support reads a project's logs only while a member allows it | Step 11 | `TestSupportGrant` |
 | Editing stored metadata stops the chunk from opening | Not in the demo | `TestMetadataIsBound` |
 
 ## Where to go next

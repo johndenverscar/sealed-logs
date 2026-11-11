@@ -28,8 +28,9 @@ spec:
           volumeMounts: [{ name: logs, mountPath: /logs }]
         - name: log-sidecar
           image: sealedlogs:dev
+          # A 500ms flush keeps live tails under a second behind the agent.
           command: [producer, sidecar, --project, p_demo, --agent, ag_demo, --session, ses_demo,
-                    --stdout, /logs/stdout.pipe, --stderr, /logs/stderr.pipe]
+                    --stdout, /logs/stdout.pipe, --stderr, /logs/stderr.pipe, --flush, 500ms]
           envFrom: [{ configMapRef: { name: sealed-env } }, { secretRef: { name: sealed-creds } }]
           volumeMounts: [{ name: logs, mountPath: /logs }]
       volumes:

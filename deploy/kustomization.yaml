@@ -22,6 +22,7 @@ configMapGenerator:
       - CH_HTTP=http://clickhouse:8123
       - MINIO_ENDPOINT=objectstore:8333
       - BAO_ADDR=http://openbao:8200
+      - KAFKA_BROKERS=redpanda:9092
 secretGenerator:
   # Demo values. The logs CLI on the host mints tokens with the same default HMAC secret.
   - name: sealed-creds

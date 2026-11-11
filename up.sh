@@ -41,7 +41,7 @@ kubectl --context "$CTX" apply -k deploy >/dev/null
 # Same tag, new image: restart the app deployments so they pick it up.
 k rollout restart deploy/keysvc deploy/collector deploy/aggregator deploy/agent deploy/demo >/dev/null
 k set env deploy/agent -c agent AGENT_CHATTER="$([[ ${CHATTER:-0} == 1 ]] && echo 1 || true)" >/dev/null
-for d in clickhouse objectstore openbao keysvc collector aggregator agent demo; do
+for d in clickhouse objectstore openbao redpanda keysvc collector aggregator agent demo; do
   k rollout status "deploy/$d" --timeout=300s >/dev/null
 done
 

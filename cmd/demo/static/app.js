@@ -43,7 +43,7 @@ function showView(v) {
   $('#view-pipeline').hidden = v !== 'pipeline';
   $('#view-logs').hidden = v !== 'logs';
   if (location.hash !== '#' + v) history.replaceState(null, '', '#' + v);
-  if (v === 'logs') lv.load();
+  if (v === 'logs') { lv.load(); loadGrants(); } else stopTail();
 }
 $$('.views button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 
@@ -175,7 +175,8 @@ const LEVELS = ['debug', 'info', 'warn', 'error'];
 const SOURCES = { sidecar: 'Hosted agent', sdk: 'SDK' };
 const lv = {
   since: '1h', as: 'member', text: '', levels: new Set(), sources: new Set(), session: '',
-  data: null, rows: [], sel: -1, loading: false, timer: null,
+  data: null, rows: [], sel: -1, loading: false,
+  live: false, es: null, fresh: new Set(), grants: [], grantSig: '',
 };
 
 function parseQuery(s) {
@@ -228,11 +229,13 @@ lv.load = async function () {
   if (!lv.data) $('#lv-empty').textContent = 'Loading logs…';
   try {
     const q = new URLSearchParams({ as: lv.as, since: lv.since, q: lv.text, session: lv.session });
+    const startedAt = new Date().toISOString();
     const r = await fetch('/api/logs?' + q);
     lv.data = await r.json();
     if (!r.ok) throw new Error(lv.data.error || r.status);
     lv.allRows = buildRows(lv.data);
     lv.render();
+    if (lv.live) startTail(startedAt);
   } catch (e) {
     lv.allRows = [];
     $('#lv-rows').replaceChildren();
@@ -258,14 +261,14 @@ lv.render = function () {
   $('#lv-rows').replaceChildren(...lv.rows.map((r, i) => {
     const src = h('span', { class: 'src' }, SOURCES[r.source] || r.source || '—');
     if (r.kind === 'line') {
-      return h('tr', { class: i === lv.sel ? 'sel' : '', onclick: () => select(i) },
+      return h('tr', { class: (i === lv.sel ? 'sel' : '') + (lv.fresh.has(rowKey(r)) ? ' fresh' : ''), onclick: () => select(i) },
         h('td', { class: 'lvl' }, h('span', { class: 'lvbar ' + r.level, title: r.level })),
         h('td', { class: 'time' }, clock(r.ts, longRange)), h('td', {}, src),
         h('td', { class: 'mono small' }, r.session || ''), h('td', { class: 'msg', title: r.msg }, r.msg));
     }
     const c = r.chunk;
     const destroyed = c.status === 'destroyed';
-    return h('tr', { class: 'sealed-row denied' + (i === lv.sel ? ' sel' : ''), onclick: () => select(i) },
+    return h('tr', { class: 'sealed-row denied' + (i === lv.sel ? ' sel' : '') + (lv.fresh.has(rowKey(r)) ? ' fresh' : ''), onclick: () => select(i) },
       h('td', { class: 'lvl' }, h('span', { class: 'lvbar ' + (destroyed ? 'denied' : 'sealed') })),
       h('td', { class: 'time' }, clock(r.ts, longRange)), h('td', {}, src),
       h('td', { class: 'mono small' }, r.session || ''),
@@ -353,7 +356,7 @@ function renderDetail() {
         h('h3', { class: 'small muted' }, 'Attributes'), h('pre', {}, JSON.stringify(r.attrs, null, 2))]
       : [h('p', { class: 'small' }, c.status === 'destroyed'
           ? "This chunk's key was destroyed. The ciphertext is still in the bucket, and nobody can read it again."
-          : `This chunk's text is sealed. keysvc only unwraps its key for members of ${(c.key_id || '').split('/')[0]}.`),
+          : `This chunk's text is sealed. keysvc only unwraps its key for members of ${(c.key_id || '').split('/')[0]}, or for operator staff they've given temporary access.`),
         kv([['Status', c.status], ['Reason', c.reason], ['Session', c.session_id], ['Source', SOURCES[c.source] || c.source],
           ['From', c.ts_min && new Date(c.ts_min).toISOString()], ['To', c.ts_max && new Date(c.ts_max).toISOString()],
           ['Lines', c.lines], ['Levels', LEVELS.filter((l) => (c.levels || {})[l]).map((l) => `${l} ${c.levels[l]}`).join(', ')],
@@ -376,17 +379,148 @@ $('#lv-q').addEventListener('keydown', (e) => {
   e.target.value = '';
   lv.load();
 });
-$('#lv-as').addEventListener('change', (e) => { lv.as = e.target.value; lv.sel = -1; lv.load(); });
+$('#lv-as').addEventListener('change', (e) => { lv.as = e.target.value; lv.sel = -1; lv.grantSig = ''; lv.load(); loadGrants(); });
 $$('#lv-range button').forEach((b) => b.addEventListener('click', () => {
   lv.since = b.dataset.since;
   $$('#lv-range button').forEach((x) => x.setAttribute('aria-pressed', x === b));
   lv.load();
 }));
 $('#lv-refresh').addEventListener('click', () => lv.load());
-$('#lv-auto').addEventListener('change', (e) => {
-  clearInterval(lv.timer);
-  if (e.target.checked) lv.timer = setInterval(() => view === 'logs' && lv.load(), 3000);
+$('#lv-live').addEventListener('change', (e) => {
+  lv.live = e.target.checked;
+  if (lv.live) lv.load(); else stopTail();
 });
+
+// ---------------- live tail ----------------
+// The aggregator streams new chunks as server-sent events, decrypted (or not)
+// for the chosen identity exactly as a query would be. Rows merge into the view.
+function stopTail() {
+  if (lv.es) lv.es.close();
+  lv.es = null;
+  $('#lv-live-dot').hidden = true;
+}
+
+function startTail(after) {
+  stopTail();
+  const q = new URLSearchParams({ as: lv.as, q: lv.text, session: lv.session, after });
+  if (lv.levels.size === 1) q.set('level', [...lv.levels][0]);
+  const es = new EventSource('/api/tail?' + q);
+  lv.es = es;
+  const dot = $('#lv-live-dot');
+  dot.hidden = false;
+  dot.className = 'live-dot small';
+  dot.textContent = '● Live';
+  es.addEventListener('chunk', (m) => {
+    const { chunk, lines } = JSON.parse(m.data);
+    if (!lv.data) return;
+    const chunks = lv.data.chunks || (lv.data.chunks = []);
+    if (chunks.some((c) => c.chunk_id === chunk.chunk_id)) return;
+    chunks.push(chunk);
+    lv.data.lines = (lv.data.lines || []).concat(lines || []);
+    const before = new Set((lv.allRows || []).map(rowKey));
+    lv.allRows = buildRows(lv.data);
+    for (const r of lv.allRows) if (!before.has(rowKey(r))) lv.fresh.add(rowKey(r));
+    lv.render();
+    setTimeout(() => lv.fresh.clear(), 2500);
+  });
+  // A key was destroyed, or someone's access ended: what's on screen may now be
+  // out of date, so reload it all (which restarts the tail).
+  es.addEventListener('revoked', () => lv.load());
+  es.onerror = () => { dot.className = 'live-dot small down'; dot.textContent = '● Reconnecting'; };
+  es.onopen = () => { dot.className = 'live-dot small'; dot.textContent = '● Live'; };
+}
+
+// ---------------- support access ----------------
+// Operator staff can't read a customer's logs. They can ask for time-boxed
+// access; a member of the project approves or denies it, and can end it early.
+// keysvc enforces all of it; this panel only shows and asks.
+const fmtLeft = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+
+async function loadGrants() {
+  if (view !== 'logs' || lv.as === 'other') { $('#lv-access').hidden = true; return; }
+  try {
+    const r = await fetch('/api/grants?as=' + lv.as);
+    lv.grants = r.ok ? await r.json() : [];
+  } catch { lv.grants = []; }
+  const sig = lv.as + JSON.stringify(lv.grants.map((g) => [g.id, g.status]));
+  if (lv.grantSig && sig !== lv.grantSig) lv.load(); // access changed: re-query
+  lv.grantSig = sig;
+  renderAccess();
+}
+
+async function grantAction(id, action, as) {
+  const r = await fetch(`/api/grants/${id}/${action}?as=${as}`, { method: 'POST' });
+  const out = await r.json();
+  if (!r.ok) status({ status: out.error || 'failed', zone: 'denied' });
+  loadGrants();
+}
+
+function renderAccess() {
+  const el = $('#lv-access');
+  const proj = $('#lv-proj').textContent || 'the project';
+  const gs = lv.grants || [];
+  const active = gs.filter((g) => g.status === 'active');
+  const pending = gs.filter((g) => g.status === 'pending');
+  const ended = gs.filter((g) => !['active', 'pending'].includes(g.status)).slice(0, 3);
+  const hist = ended.length ? h('div', { class: 'hist' }, 'Earlier: ' + ended.map((g) =>
+    `${g.id} ${g.status}${g.decided_by ? ' (' + (g.ended_by || g.decided_by) + ')' : ''}`).join(' · ')) : null;
+  el.hidden = false;
+  el.classList.toggle('active', active.length > 0);
+
+  if (lv.as === 'staff') {
+    const g = active[0];
+    if (g) {
+      el.replaceChildren(h('div', { class: 'row' },
+        h('span', {}, '🔓'),
+        h('span', { class: 'grow' }, `Temporary access to ${g.project}, approved by ${g.decided_by}. You can read its logs for `,
+          h('span', { class: 'left', 'data-expires': g.expires_at }, fmtLeft(new Date(g.expires_at) - Date.now())), '.'),
+        h('button', { class: 'btn', type: 'button', onclick: () => grantAction(g.id, 'revoke', 'staff') }, 'End access now')), hist);
+      return;
+    }
+    if (pending[0]) {
+      const p = pending[0];
+      el.replaceChildren(h('div', { class: 'row' }, h('span', {}, '⏳'),
+        h('span', { class: 'grow' }, `Access requested for ${p.minutes} min ("${p.reason}"). Waiting for a member of ${p.project} to approve. `,
+          h('span', { class: 'muted' }, 'Switch Viewing as to the project member to approve it.'))), hist);
+      return;
+    }
+    const reason = h('input', { value: 'Ticket #4821: customer reports failed card charges', 'aria-label': 'Reason' });
+    const mins = h('select', { 'aria-label': 'Duration' }, h('option', { value: '2' }, '2 min'), h('option', { value: '15', selected: true }, '15 min'), h('option', { value: '60' }, '1 hour'));
+    el.replaceChildren(
+      h('div', { class: 'row' }, h('span', {}, '🔒'), h('span', { class: 'grow' },
+        `You can see when and where ${proj} logged, not what it said. To read it, ask the customer for temporary access.`)),
+      h('div', { class: 'row' }, reason, mins, h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+        const r = await fetch('/api/grants', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: reason.value, minutes: Number(mins.value) }) });
+        const out = await r.json();
+        status(r.ok ? { status: `Requested ${out.id}. A member of ${proj} has to approve it.`, zone: 'key' } : { status: out.error, zone: 'denied' });
+        loadGrants();
+      } }, 'Request access')), hist);
+    return;
+  }
+
+  // project member
+  const rows = [];
+  for (const p of pending) rows.push(h('div', { class: 'row' }, h('span', {}, '🙋'),
+    h('span', { class: 'grow' }, h('b', {}, p.grantee), ` (operator staff) asks for ${p.minutes} min of access to read ${p.project}'s logs: "${p.reason}"`),
+    h('button', { class: 'btn primary', type: 'button', onclick: () => grantAction(p.id, 'approve', 'member') }, 'Approve'),
+    h('button', { class: 'btn', type: 'button', onclick: () => grantAction(p.id, 'deny', 'member') }, 'Deny')));
+  for (const g of active) rows.push(h('div', { class: 'row' }, h('span', {}, '🔓'),
+    h('span', { class: 'grow' }, h('b', {}, g.grantee), ` can read ${g.project}'s logs for `,
+      h('span', { class: 'left', 'data-expires': g.expires_at }, fmtLeft(new Date(g.expires_at) - Date.now())), ` (approved by ${g.decided_by}).`),
+    h('button', { class: 'btn danger', type: 'button', onclick: () => grantAction(g.id, 'revoke', 'member') }, 'Revoke')));
+  if (!rows.length) { if (!hist) { el.hidden = true; return; } rows.push(h('div', { class: 'small muted' }, 'No support access requests.')); }
+  el.replaceChildren(...rows, hist);
+}
+
+setInterval(() => {
+  for (const s of $$('#lv-access [data-expires]')) {
+    const left = new Date(s.dataset.expires) - Date.now();
+    s.textContent = fmtLeft(left);
+    if (left <= 0) loadGrants();
+  }
+}, 1000);
+setInterval(loadGrants, 2000);
 
 // ---------------- start ----------------
 preview();

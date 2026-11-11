@@ -1,5 +1,6 @@
-// collector accepts sealed chunks from producers, stores the object, and writes a
-// metadata-only index row to ClickHouse. It never holds a key and never decrypts.
+// collector accepts sealed chunks from producers, stores the object, writes a
+// metadata-only index row to ClickHouse, and publishes the stored chunk to the
+// live-tail stream. It never holds a key and never decrypts.
 package main
 
 import (
@@ -17,11 +18,13 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"sealedlogs/internal/auth"
 	"sealedlogs/internal/config"
 	"sealedlogs/internal/envelope"
 	"sealedlogs/internal/events"
+	"sealedlogs/internal/stream"
 )
 
 const schema = `CREATE TABLE IF NOT EXISTS sealed.log_chunks (
@@ -44,6 +47,7 @@ const schema = `CREATE TABLE IF NOT EXISTS sealed.log_chunks (
 type server struct {
 	ch    driver.Conn
 	store *minio.Client
+	kafka *kgo.Client
 }
 
 func main() {
@@ -68,7 +72,11 @@ func main() {
 	// volume. Pay that before reporting ready, not inside a producer's request.
 	must(warmUp(ctx, mc))
 
-	s := &server{ch: ch, store: mc}
+	kc, err := stream.NewClient(kgo.DefaultProduceTopic(stream.Topic), kgo.ProducerLinger(0))
+	must(err)
+	must(stream.EnsureTopic(ctx, kc))
+
+	s := &server{ch: ch, store: mc, kafka: kc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("POST /chunks", s.chunks)
@@ -128,7 +136,23 @@ func (s *server) chunks(w http.ResponseWriter, r *http.Request) {
 	events.Emit("collector", "indexed", map[string]any{
 		"chunk_id": m.ChunkID, "key_id": m.KeyID, "lines": m.Lines, "levels": m.Levels, "session_id": m.SessionID,
 	})
+	s.publish(r.Context(), m, objectKey, body)
 	writeJSON(w, 201, map[string]any{"object_key": objectKey})
+}
+
+// publish puts the stored chunk on the live-tail stream. Storage is the record:
+// if the stream is down, the chunk is still stored and indexed, and only live
+// tails miss it until they reload.
+func (s *server) publish(ctx context.Context, m envelope.Meta, objectKey string, body []byte) {
+	val, _ := json.Marshal(stream.Message{ObjectKey: objectKey, Chunk: body})
+	rec := &kgo.Record{Key: []byte(m.Project), Value: val}
+	if err := s.kafka.ProduceSync(ctx, rec).FirstErr(); err != nil {
+		events.Emit("collector", "publish_failed", map[string]any{"chunk_id": m.ChunkID, "error": err.Error()})
+		return
+	}
+	events.Emit("collector", "published", map[string]any{
+		"chunk_id": m.ChunkID, "key_id": m.KeyID, "topic": stream.Topic, "partition": rec.Partition, "offset": rec.Offset, "bytes": len(val),
+	})
 }
 
 func warmUp(ctx context.Context, mc *minio.Client) error {

@@ -168,3 +168,21 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .lv-detail dd { margin: 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
 .lv-detail pre { margin: 0; font: 12.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; background: var(--bg); border-radius: 6px; padding: 10px; }
 .lv-detail .foot { font-size: 12px; color: var(--muted); }
+
+/* live tail */
+.live-dot { color: var(--l-info); font-weight: 600; animation: pulse 1.6s ease-in-out infinite; }
+.live-dot.down { color: var(--denied); animation: none; }
+@keyframes pulse { 50% { opacity: .35; } }
+.lv-table tr.fresh td { animation: fresh 2.4s ease-out; }
+@keyframes fresh { from { background: var(--key-bg); } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .live-dot, .lv-table tr.fresh td { animation: none; } }
+
+/* support access */
+.lv-access { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--key); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; }
+.lv-access.active { border-left-color: var(--plain); background: var(--plain-bg); }
+.lv-access .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.lv-access .row .grow { flex: 1; min-width: 200px; }
+.lv-access input { padding: 6px 9px; font-size: 13px; min-width: 260px; flex: 1; }
+.lv-access select { padding: 5px 6px; font-size: 13px; }
+.lv-access .left { font: 600 13px var(--mono); }
+.lv-access .hist { color: var(--muted); font-size: 12px; }

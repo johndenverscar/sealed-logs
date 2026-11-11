@@ -38,6 +38,8 @@ var (
 	MinioPass     = Env("MINIO_PASS", "sealed-secret")
 	Bucket        = Env("BUCKET", "sealed-logs")
 
+	KafkaBrokers = Env("KAFKA_BROKERS", "127.0.0.1:19092")
+
 	BaoAddr  = Env("BAO_ADDR", "http://127.0.0.1:18200")
 	BaoToken = Env("BAO_TOKEN", "root")
 

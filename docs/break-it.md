@@ -56,24 +56,26 @@ unwrap goes through. A protection that sits behind a policy check is only as goo
 as what the policy hands it. A real deployment would also limit keysvc's KMS
 credentials, so it could only unwrap in a context the caller had proved it owns.
 
-## 3. Let support staff decrypt
+## 3. Let one support grant open every project
 
-Say a support engineer asks for read access "just for debugging". In `unwrap`,
-change the role check to:
+Support staff can read a project's logs only while a member of that project has
+approved a grant. In [`cmd/keysvc/main.go`](../cmd/keysvc/main.go), in
+`activeGrant`, stop matching the grant's project:
 
 ```go
-case c.Role != auth.RoleMember && c.Role != auth.RoleStaff:
+rows, err := s.db.Query(`SELECT `+grantCols+` FROM grants WHERE grantee=? AND (project=? OR 1=1) AND status='active'`, sub, project)
 ```
 
 Then run `go test ./cmd/keysvc`.
 
-`TestUnwrapPolicy` fails on "staff" and "staff claiming the project".
+`TestSupportGrant` fails on "p_demo grant opened a p_other key". One customer
+said yes, and now the support engineer can read every customer's logs for the
+next hour.
 
-With that one line, the promise to customers goes from "we can't read your logs"
-back to "we have a policy against reading your logs". If support really does
-need access, the better shape is a grant the customer gives: a time-limited,
-audited token for one project, issued by someone in that project. That way
-keysvc's rule (members of the key's project, nobody else) stays the same.
+The approval is only worth anything if it's scoped to what the approver owns. A
+member of p_demo can speak for p_demo, and for nobody else. The same goes for
+who approves: drop the `member` check in `decideGrant` and staff can approve
+their own requests, which is a standing decrypt path with extra steps.
 
 ## 4. Let plaintext in
 

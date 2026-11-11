@@ -6,6 +6,10 @@ A very basic implementation of log encryption for customer platforms.
 - Storage only ever holds ciphertext, plus a bit of metadata so queries stay fast.
 - People in the customer's project can read their logs. Operator staff and other
   customers get ciphertext.
+- Support staff can ask a project for temporary access. A member of the project
+  approves it, it ends on its own, and the member can cut it short.
+- Logs can be tailed live, decrypted for whoever is watching, the same way a
+  query is.
 - Deleting a day's key deletes that day's logs everywhere, backups included.
 
 It runs on your laptop in a [kind](https://kind.sigs.k8s.io) cluster and comes
@@ -28,10 +32,12 @@ flowchart LR
   sidecar -- "{meta, sealed}" --> collector
   collector --> bucket[("object store<br/>sealed chunks")]
   collector --> ch[("ClickHouse<br/>metadata index")]
-  viewer["viewer<br/>(member / staff / other)"] -- "query + own token" --> aggregator
+  collector --> topic[("Redpanda<br/>sealed-chunks topic")]
+  viewer["viewer<br/>(member / staff / other)"] -- "query or tail<br/>+ own token" --> aggregator
+  topic -- "live tail" --> aggregator
   aggregator -- "1. narrow by index" --> ch
   aggregator -- "2. fetch chunks" --> bucket
-  aggregator -- "3. unwrap with<br/>caller's token" --> keysvc["keysvc<br/>key policy + audit"]
+  aggregator -- "3. unwrap with<br/>caller's token" --> keysvc["keysvc<br/>key policy, grants, audit"]
   keysvc -- "wrap / unwrap" --> kms[("KMS<br/>OpenBao Transit")]
 ```
 
@@ -45,11 +51,14 @@ Here's the trip a log line takes.
    trusts that key, it checks keysvc's signature on it.
 3. The collector stores the encrypted chunk in the bucket and writes a row of
    metadata (project, session, time range, how many errors) to ClickHouse. It
-   turns away anything that isn't encrypted.
+   turns away anything that isn't encrypted. It also publishes the same
+   encrypted chunk to a stream, for anyone tailing.
 4. When someone queries, the aggregator uses the index to find the right chunks,
    fetches them, and asks keysvc to unwrap that day's key using *the caller's*
-   token. keysvc only says yes to members of the key's project. The aggregator
-   then decrypts and searches in memory.
+   token. keysvc only says yes to members of the key's project, or to support
+   staff the project has given temporary access. The aggregator then decrypts
+   and searches in memory. A live tail works the same way, reading chunks off the
+   stream as they arrive.
 5. Purging a day destroys its key. The ciphertext stays exactly where it is, and
    nobody can read it again.
 
@@ -58,10 +67,11 @@ Here's the trip a log line takes.
 | `agent` pod: `agent` + `log-sidecar` | [`cmd/producer`](cmd/producer/main.go) | Customer code running on a hosting platform, next to a log-shipping sidecar |
 | `collector` | [`cmd/collector`](cmd/collector/main.go) | The log ingest service |
 | `aggregator` | [`cmd/aggregator`](cmd/aggregator/main.go) | The log query service |
-| `keysvc` | [`cmd/keysvc`](cmd/keysvc/main.go) | A key service: day keys, signed public keys, the unwrap policy, purge, retention, audit |
+| `keysvc` | [`cmd/keysvc`](cmd/keysvc/main.go) | A key service: day keys, signed public keys, the unwrap policy, support access grants, purge, retention, audit |
 | `clickhouse` | | The metadata index |
 | `objectstore` (SeaweedFS) | | Any S3-compatible object store |
 | `openbao` | [`internal/wrap`](internal/wrap/wrap.go) | Any KMS, behind a small `KeyWrapper` interface |
+| `redpanda` | [`internal/stream`](internal/stream/stream.go) | Any Kafka-compatible stream |
 
 The chunk format (compression, encryption and the authenticated metadata) lives
 in [`internal/envelope`](internal/envelope/envelope.go). The web demo is
@@ -107,7 +117,7 @@ CHATTER=1 ./up.sh                    # have the fake agent log on its own
 ```
 
 Everything listens on 127.0.0.1: the demo on 7100, keysvc on 7101, the collector on 7102, the
-aggregator on 7103, the agent on 7104 (`POST /log`), ClickHouse on 18123 and the
+aggregator on 7103 (`/logs` and `/tail`), the agent on 7104 (`POST /log`), ClickHouse on 18123 and the
 object store on 19100.
 
 To run the tests:

@@ -59,7 +59,7 @@ spec:
       initContainers:
         - name: wait-for-storage
           image: sealedlogs:dev
-          command: [bash, -c, "for hp in clickhouse/9000 objectstore/8333; do until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do sleep 1; done; done"]
+          command: [bash, -c, "for hp in clickhouse/9000 objectstore/8333 redpanda/9092; do until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do sleep 1; done; done"]
       containers:
         - name: collector
           image: sealedlogs:dev
@@ -89,7 +89,7 @@ spec:
       initContainers:
         - name: wait-for-deps
           image: sealedlogs:dev
-          command: [bash, -c, "for hp in clickhouse/9000 objectstore/8333 keysvc/7101; do until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do sleep 1; done; done"]
+          command: [bash, -c, "for hp in clickhouse/9000 objectstore/8333 keysvc/7101 redpanda/9092; do until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do sleep 1; done; done"]
       containers:
         - name: aggregator
           image: sealedlogs:dev

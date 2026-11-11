@@ -97,7 +97,8 @@
         <button data-since="15m">15m</button><button data-since="1h" aria-pressed="true">1h</button><button data-since="4h">4h</button><button data-since="24h">1d</button><button data-since="168h">7d</button>
       </div>
       <button class="btn" id="lv-refresh">Refresh</button>
-      <label class="small toggle"><input type="checkbox" id="lv-auto"> Auto-refresh</label>
+      <label class="small toggle"><input type="checkbox" id="lv-live"> Live tail</label>
+      <span class="live-dot small" id="lv-live-dot" hidden>● Live</span>
     </div>
   </div>
 
@@ -105,6 +106,8 @@
     <input id="lv-q" placeholder="Filter your logs: free text, or level:error session:ses_demo source:sidecar" autocomplete="off">
     <div class="chips" id="lv-chips"></div>
   </div>
+
+  <div class="lv-access" id="lv-access" hidden></div>
 
   <div class="lv-hist" id="lv-hist" aria-label="Log volume by level"></div>
 

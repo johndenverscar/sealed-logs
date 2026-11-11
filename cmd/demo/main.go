@@ -5,13 +5,15 @@
 //     reports what it received and produced as JSON events on its own stdout, and
 //     this server follows them with kubectl logs. The bucket, ClickHouse and keysvc
 //     panels are read live from the stores. Nothing shown is asserted by the demo.
-//   - Logs: the product's log viewer, as the customer would use it. It queries the
-//     aggregator as whichever demo identity you pick.
+//   - Logs: the product's log viewer, as the customer would use it. It queries
+//     and live-tails the aggregator as whichever demo identity you pick, and
+//     shows support access requests to staff and to project members.
 //
 // The page talks only to this server; the server talks to the cluster.
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"io"
@@ -47,6 +49,10 @@ func (d *Demo) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/purge", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, PurgeToday()) })
 	mux.HandleFunc("POST /api/plaintext", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, SendPlaintext()) })
 	mux.HandleFunc("GET /api/logs", logs)
+	mux.HandleFunc("GET /api/tail", tail)
+	mux.HandleFunc("GET /api/grants", grants)
+	mux.HandleFunc("POST /api/grants", requestGrant)
+	mux.HandleFunc("POST /api/grants/{id}/{action}", decideGrant)
 	return mux
 }
 
@@ -148,6 +154,86 @@ func logs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// tail proxies the aggregator's live tail (server-sent events) as a demo identity.
+func tail(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	v := url.Values{"project": {config.DemoProject}, "q": {q.Get("q")}, "session": {q.Get("session")},
+		"level": {q.Get("level")}, "after": {q.Get("after")}}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, config.AggregatorURL+"/tail?"+v.Encode(), nil)
+	req.Header.Set("Authorization", "Bearer "+auth.DemoToken(viewer(q.Get("as"))))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "aggregator: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(resp.StatusCode)
+	fl, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func viewer(as string) string {
+	if _, ok := viewers[as]; ok {
+		return as
+	}
+	return "member"
+}
+
+// keysvc calls keysvc as a demo identity and passes the answer through.
+func keysvc(w http.ResponseWriter, method, path, as string, body io.Reader) {
+	req, _ := http.NewRequest(method, config.KeysvcURL+path, body)
+	req.Header.Set("Authorization", "Bearer "+auth.DemoToken(as))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		writeJSON(w, map[string]string{"error": "keysvc: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// grants lists the support access grants the chosen identity can see.
+func grants(w http.ResponseWriter, r *http.Request) {
+	keysvc(w, http.MethodGet, "/grants?project="+url.QueryEscape(config.DemoProject), viewer(r.URL.Query().Get("as")), nil)
+}
+
+// requestGrant is operator staff asking the demo project for temporary access.
+func requestGrant(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Reason  string `json:"reason"`
+		Minutes int    `json:"minutes"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	b, _ := json.Marshal(map[string]any{"project": config.DemoProject, "reason": req.Reason, "minutes": req.Minutes})
+	keysvc(w, http.MethodPost, "/grants", "staff", bytes.NewReader(b))
+}
+
+// decideGrant approves, denies or ends a grant as the chosen identity.
+func decideGrant(w http.ResponseWriter, r *http.Request) {
+	keysvc(w, http.MethodPost, "/grants/"+url.PathEscape(r.PathValue("id"))+"/"+url.PathEscape(r.PathValue("action")),
+		viewer(r.URL.Query().Get("as")), nil)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

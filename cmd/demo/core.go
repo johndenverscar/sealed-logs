@@ -40,7 +40,7 @@ const (
 	zInfo   Zone = "info"
 )
 
-var stages = []string{"agent", "sidecar", "collector", "bucket", "clickhouse", "aggregator", "keysvc", "viewer"}
+var stages = []string{"agent", "sidecar", "collector", "bucket", "clickhouse", "stream", "aggregator", "keysvc", "viewer"}
 
 // ---- events ----
 
@@ -343,6 +343,17 @@ func (d *Demo) Derive(t *Trace) Derived {
 				add(e, "clickhouse", zSealed, "ClickHouse index row written",
 					fmt.Sprintf("session %s, level counts %v, key_id %s", e.s("session_id"), e["levels"], e.s("key_id")))
 			}
+		case "collector/published":
+			if chunk {
+				out.byStage["stream"] = append(out.byStage["stream"], e)
+				add(e, "stream", zSealed, fmt.Sprintf("Published to the live-tail stream (%s, offset %d)", e.s("topic"), e.n("offset")),
+					"the same sealed chunk as the bucket: live tails read it from here")
+			}
+		case "collector/publish_failed":
+			if chunk {
+				out.byStage["stream"] = append(out.byStage["stream"], e)
+				add(e, "stream", zDenied, "Publishing to the live-tail stream failed", e.s("error"))
+			}
 		case "aggregator/chunk":
 			if !chunk {
 				continue
@@ -356,7 +367,11 @@ func (d *Demo) Derive(t *Trace) Derived {
 				add(e, "keysvc", ifz(z == zDenied, zDenied, zKey), fmt.Sprintf("Earlier keysvc decision for %s reused from the aggregator's cache: %s", e.s("sub"), e.s("status")),
 					"the aggregator reported key_cache=true: no keysvc call this time")
 			}
-			add(e, "aggregator", z, fmt.Sprintf("Aggregator opened the chunk for %s (%s): %s", e.s("sub"), e.s("role"), e.s("status")),
+			how := "Aggregator opened the chunk"
+			if e.s("via") == "stream" || e.s("via") == "backfill" {
+				how = "Aggregator opened the chunk for a live tail"
+			}
+			add(e, "aggregator", z, fmt.Sprintf("%s for %s (%s): %s", how, e.s("sub"), e.s("role"), e.s("status")),
 				strings.TrimSpace(e.s("reason")+ifs(e.b("key_cache"), "  · key_cache=true", "")))
 		case "keysvc/unwrap":
 			if key && e.ts().After(sealedAt) {

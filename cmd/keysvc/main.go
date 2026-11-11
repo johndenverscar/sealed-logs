@@ -1,6 +1,7 @@
 // keysvc issues one key pair per project per day, wraps private keys with the
-// master-key backend, and unwraps only for members of the key's own project.
-// Every unwrap, denial, purge and expiry is audited.
+// master-key backend, and unwraps only for members of the key's own project, or
+// for operator staff holding a time-boxed access grant that a member approved.
+// Every unwrap, denial, grant, purge and expiry is audited.
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +64,9 @@ CREATE TABLE IF NOT EXISTS keys(
   key_id TEXT PRIMARY KEY, project TEXT, day TEXT, gen INTEGER,
   pub BLOB, sig BLOB, wrapped TEXT, created_at TEXT, destroyed_at TEXT, destroy_reason TEXT);
 CREATE TABLE IF NOT EXISTS revocations(seq INTEGER PRIMARY KEY AUTOINCREMENT, key_id TEXT, ts TEXT);
+CREATE TABLE IF NOT EXISTS grants(
+  id TEXT PRIMARY KEY, project TEXT, grantee TEXT, reason TEXT, minutes INTEGER, status TEXT,
+  requested_at TEXT, decided_by TEXT, decided_at TEXT, expires_at TEXT, ended_by TEXT, ended_at TEXT);
 CREATE TABLE IF NOT EXISTS audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, sub TEXT, caller_project TEXT, role TEXT,
   key_id TEXT, action TEXT, allowed INTEGER, reason TEXT);`
@@ -70,6 +75,9 @@ func newServer(db *sql.DB, w wrap.KeyWrapper, sign ed25519.PrivateKey, allowPast
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+	// A revocation either destroys a key (key_id) or ends someone's access (sub).
+	// Older databases predate the sub column.
+	_, _ = db.Exec(`ALTER TABLE revocations ADD COLUMN sub TEXT`)
 	return &server{db: db, wrapper: w, sign: sign, allowPast: allowPast, retention: retention}, nil
 }
 
@@ -83,6 +91,9 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /keys", s.list)
 	mux.HandleFunc("GET /revocations", s.revocations)
 	mux.HandleFunc("GET /audit", s.auditLog)
+	mux.HandleFunc("POST /grants", s.requestGrant)
+	mux.HandleFunc("GET /grants", s.listGrants)
+	mux.HandleFunc("POST /grants/{id}/{action}", s.decideGrant)
 	return mux
 }
 
@@ -221,8 +232,19 @@ func (s *server) unwrap(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "unknown key")
 		return
 	}
-	reason := ""
+	reason, allowReason := "", "project member"
+	var expires time.Time
 	switch {
+	case c.Role == auth.RoleStaff:
+		// Staff never decrypt on their own authority. A member of the project has to
+		// approve a grant, and it only lasts as long as they agreed to.
+		g := s.activeGrant(c.Subject, k.Project)
+		if g == nil {
+			reason = fmt.Sprintf("role %q has no decrypt path: no active access grant for %s", c.Role, k.Project)
+			break
+		}
+		expires = g.Expires
+		allowReason = fmt.Sprintf("support access grant %s, approved by %s, until %s", g.ID, g.DecidedBy, g.Expires.Format("15:04:05Z"))
 	case c.Role != auth.RoleMember:
 		reason = fmt.Sprintf("role %q has no decrypt path", c.Role)
 	case c.Project != k.Project:
@@ -245,8 +267,12 @@ func (s *server) unwrap(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 502, "unwrap failed")
 		return
 	}
-	s.audit(c, k.KeyID, "unwrap", true, "project member")
-	writeJSON(w, 200, map[string]any{"key_id": k.KeyID, "priv": priv})
+	s.audit(c, k.KeyID, "unwrap", true, allowReason)
+	out := map[string]any{"key_id": k.KeyID, "priv": priv}
+	if !expires.IsZero() {
+		out["expires_at"] = expires // decrypters must not cache the key past this
+	}
+	writeJSON(w, 200, out)
 	clear(priv)
 }
 
@@ -297,7 +323,8 @@ func (s *server) retentionLoop() {
 	for {
 		cutoff := time.Now().UTC().AddDate(0, 0, -s.retention).Format(dayFmt)
 		s.destroy("retention", `day < ?`, cutoff)
-		time.Sleep(30 * time.Second)
+		s.expireGrants()
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -337,11 +364,12 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
-// revocations is the feed decrypters poll to evict cached keys. Purge latency is
+// revocations is the feed decrypters poll to evict cached decisions: a destroyed
+// key (key_id), or a person whose access grant started or ended (sub). Purge latency is
 // bounded by their poll interval, not by their cache TTL.
 func (s *server) revocations(w http.ResponseWriter, r *http.Request) {
 	after, _ := strconv.Atoi(r.URL.Query().Get("after"))
-	rows, err := s.db.Query(`SELECT seq, key_id FROM revocations WHERE seq > ? ORDER BY seq`, after)
+	rows, err := s.db.Query(`SELECT seq, COALESCE(key_id, ''), COALESCE(sub, '') FROM revocations WHERE seq > ? ORDER BY seq`, after)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
@@ -349,12 +377,13 @@ func (s *server) revocations(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	type rev struct {
 		Seq   int    `json:"seq"`
-		KeyID string `json:"key_id"`
+		KeyID string `json:"key_id,omitempty"`
+		Sub   string `json:"sub,omitempty"`
 	}
 	out := []rev{}
 	for rows.Next() {
 		var x rev
-		if rows.Scan(&x.Seq, &x.KeyID) == nil {
+		if rows.Scan(&x.Seq, &x.KeyID, &x.Sub) == nil {
 			out = append(out, x)
 		}
 	}
@@ -415,4 +444,211 @@ func must(err error) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// ---- just-in-time support access ----
+
+const maxGrantMinutes = 60
+
+type grant struct {
+	ID        string    `json:"id"`
+	Project   string    `json:"project"`
+	Grantee   string    `json:"grantee"`
+	Reason    string    `json:"reason"`
+	Minutes   int       `json:"minutes"`
+	Status    string    `json:"status"` // pending, active, denied, revoked, expired
+	Requested time.Time `json:"requested_at"`
+	DecidedBy string    `json:"decided_by,omitempty"`
+	Expires   time.Time `json:"expires_at,omitzero"`
+	EndedBy   string    `json:"ended_by,omitempty"`
+}
+
+const grantCols = `id, project, grantee, reason, minutes, status, requested_at,
+	COALESCE(decided_by, ''), COALESCE(expires_at, ''), COALESCE(ended_by, '')`
+
+func scanGrant(sc interface{ Scan(...any) error }) (*grant, error) {
+	g := &grant{}
+	var req, exp string
+	if err := sc.Scan(&g.ID, &g.Project, &g.Grantee, &g.Reason, &g.Minutes, &g.Status, &req, &g.DecidedBy, &exp, &g.EndedBy); err != nil {
+		return nil, err
+	}
+	g.Requested, _ = time.Parse(time.RFC3339Nano, req)
+	g.Expires, _ = time.Parse(time.RFC3339Nano, exp)
+	if g.Status == "active" && !time.Now().Before(g.Expires) {
+		g.Status = "expired"
+	}
+	return g, nil
+}
+
+func (s *server) grantByID(id string) *grant {
+	g, err := scanGrant(s.db.QueryRow(`SELECT `+grantCols+` FROM grants WHERE id=?`, id))
+	if err != nil {
+		return nil
+	}
+	return g
+}
+
+// activeGrant is the grant that lets this staff member decrypt a project's
+// keys right now, if there is one.
+func (s *server) activeGrant(sub, project string) *grant {
+	rows, err := s.db.Query(`SELECT `+grantCols+` FROM grants WHERE grantee=? AND project=? AND status='active'`, sub, project)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if g, err := scanGrant(rows); err == nil && g.Status == "active" {
+			return g
+		}
+	}
+	return nil
+}
+
+// requestGrant is a staff member asking a project for temporary read access.
+// Nothing changes until a member of that project approves it.
+func (s *server) requestGrant(w http.ResponseWriter, r *http.Request) {
+	c, _, err := auth.FromRequest(r)
+	if err != nil || c.Role != auth.RoleStaff {
+		httpErr(w, 403, "only operator staff request access")
+		return
+	}
+	var req struct {
+		Project string `json:"project"`
+		Reason  string `json:"reason"`
+		Minutes int    `json:"minutes"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Project == "" || strings.TrimSpace(req.Reason) == "" {
+		httpErr(w, 400, "project and reason are required")
+		return
+	}
+	if req.Minutes < 1 || req.Minutes > maxGrantMinutes {
+		httpErr(w, 400, fmt.Sprintf("minutes must be 1 to %d", maxGrantMinutes))
+		return
+	}
+	if s.activeGrant(c.Subject, req.Project) != nil {
+		httpErr(w, 409, "you already have access to this project")
+		return
+	}
+	id := "gr_" + randID()
+	_, err = s.db.Exec(`INSERT INTO grants(id, project, grantee, reason, minutes, status, requested_at) VALUES(?,?,?,?,?,'pending',?)`,
+		id, req.Project, c.Subject, req.Reason, req.Minutes, now())
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	s.audit(c, req.Project, "grant_request", true, fmt.Sprintf("%s: %d min, %q", id, req.Minutes, req.Reason))
+	writeJSON(w, 201, s.grantByID(id))
+}
+
+// listGrants shows a project's members every grant for their project, and staff
+// their own.
+func (s *server) listGrants(w http.ResponseWriter, r *http.Request) {
+	c, _, err := auth.FromRequest(r)
+	if err != nil {
+		httpErr(w, 401, "invalid token")
+		return
+	}
+	project := r.URL.Query().Get("project")
+	var rows *sql.Rows
+	switch {
+	case c.Role == auth.RoleMember && c.Project == project:
+		rows, err = s.db.Query(`SELECT `+grantCols+` FROM grants WHERE project=? ORDER BY requested_at DESC LIMIT 20`, project)
+	case c.Role == auth.RoleStaff:
+		rows, err = s.db.Query(`SELECT `+grantCols+` FROM grants WHERE grantee=? AND (project=? OR ?='') ORDER BY requested_at DESC LIMIT 20`, c.Subject, project, project)
+	default:
+		httpErr(w, 403, "members of the project, or the staff member asking, only")
+		return
+	}
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	out := []*grant{}
+	for rows.Next() {
+		if g, err := scanGrant(rows); err == nil {
+			out = append(out, g)
+		}
+	}
+	writeJSON(w, 200, out)
+}
+
+// decideGrant approves, denies or ends a grant. Members of the grant's project
+// decide; the staff member can also end their own access early.
+func (s *server) decideGrant(w http.ResponseWriter, r *http.Request) {
+	c, _, err := auth.FromRequest(r)
+	if err != nil {
+		httpErr(w, 401, "invalid token")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g := s.grantByID(r.PathValue("id"))
+	if g == nil {
+		httpErr(w, 404, "unknown grant")
+		return
+	}
+	member := c.Role == auth.RoleMember && c.Project == g.Project
+	action := r.PathValue("action")
+	var res sql.Result
+	switch {
+	case action == "approve" && member && g.Status == "pending":
+		exp := time.Now().UTC().Add(time.Duration(g.Minutes) * time.Minute)
+		res, err = s.db.Exec(`UPDATE grants SET status='active', decided_by=?, decided_at=?, expires_at=? WHERE id=? AND status='pending'`,
+			c.Subject, now(), exp.Format(time.RFC3339Nano), g.ID)
+	case action == "deny" && member && g.Status == "pending":
+		res, err = s.db.Exec(`UPDATE grants SET status='denied', decided_by=?, decided_at=? WHERE id=? AND status='pending'`, c.Subject, now(), g.ID)
+	case action == "revoke" && (member || c.Subject == g.Grantee) && g.Status == "active":
+		res, err = s.db.Exec(`UPDATE grants SET status='revoked', ended_by=?, ended_at=? WHERE id=? AND status='active'`, c.Subject, now(), g.ID)
+	default:
+		reason := fmt.Sprintf("%s %s grant: not allowed for %s (%s)", action, g.Status, c.Subject, c.Role)
+		s.audit(c, g.Project, "grant_"+action, false, g.ID+": "+reason)
+		httpErr(w, 403, reason)
+		return
+	}
+	if err == nil {
+		if n, _ := res.RowsAffected(); n != 1 {
+			err = errors.New("grant changed underneath us")
+		}
+	}
+	if err == nil && action != "deny" {
+		// This person's access changed: decrypters drop every decision they cached
+		// for them (keys after a revoke, denials after an approval).
+		_, err = s.db.Exec(`INSERT INTO revocations(sub, ts) VALUES(?, ?)`, g.Grantee, now())
+	}
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	s.audit(c, g.Project, "grant_"+action, true, fmt.Sprintf("%s for %s", g.ID, g.Grantee))
+	writeJSON(w, 200, s.grantByID(g.ID))
+}
+
+// expireGrants records grants that ran out. Unwrap already refuses them; this
+// keeps the audit log and the grant list honest.
+func (s *server) expireGrants() {
+	rows, err := s.db.Query(`SELECT id, project, grantee FROM grants WHERE status='active' AND expires_at <= ?`, now())
+	if err != nil {
+		return
+	}
+	type ended struct{ id, project, grantee string }
+	var done []ended
+	for rows.Next() {
+		var e ended
+		if rows.Scan(&e.id, &e.project, &e.grantee) == nil {
+			done = append(done, e)
+		}
+	}
+	rows.Close()
+	for _, e := range done {
+		_, _ = s.db.Exec(`UPDATE grants SET status='expired', ended_at=? WHERE id=?`, now(), e.id)
+		_, _ = s.db.Exec(`INSERT INTO revocations(sub, ts) VALUES(?, ?)`, e.grantee, now())
+		s.audit(&auth.Claims{Role: "system"}, e.project, "grant_expire", true, e.id+" for "+e.grantee)
+	}
+}
+
+func randID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
